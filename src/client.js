@@ -20,7 +20,36 @@ function instantCompactionClientFactory(require) {
   Object.defineProperty(exports, Symbol.toStringTag, { value: "Module" });
 
   var React = require("react");
-  var { createSnapshotStore } = require("@deepseek-ai/dsh-client-runtime/client");
+
+  /**
+   * Minimal snapshot store compatible with React's useSyncExternalStore.
+   *
+   * ⚠️ 2026-11-06 (this fork) — do NOT require
+   * `@deepseek-ai/dsh-client-runtime/client` here. That package does not exist
+   * in the host: the boot graph has no such module, so the require threw at
+   * materialization and the whole entry failed to activate
+   * ("web boot: 1 entry did not activate ... import failed"), which stops the
+   * app from starting. The store only ever needs set/getSnapshot/subscribe, so
+   * it is defined locally instead of depending on a host internal.
+   */
+  function createSnapshotStore(initial) {
+    var value = initial;
+    var listeners = new Set();
+    return {
+      getSnapshot: function () { return value; },
+      set: function (next) {
+        if (Object.is(next, value)) return;
+        value = next;
+        listeners.forEach(function (listener) {
+          try { listener(); } catch (_) { /* one bad subscriber must not break the rest */ }
+        });
+      },
+      subscribe: function (listener) {
+        listeners.add(listener);
+        return function () { listeners.delete(listener); };
+      }
+    };
+  }
 
   // ── styles (injected once per page, matching the official cards' tokens) ──
   var css = [
@@ -506,12 +535,31 @@ function instantCompactionClientFactory(require) {
   /** Namespace of the instant-compaction settings section (Host side registers it). */
   var SETTINGS_NAMESPACE = "compaction-vcc";
   /** Required services (cordis fiber inject). */
-  var inject = ["slots", "locale", "connection", "remote", "settingsScope"];
+  /**
+   * ⚠️ 2026-11-06 (this fork) — `settingsScope` is NOT a host service.
+   *
+   * The previous declaration listed it, and nothing in the host provides it
+   * (grep across ~20.5k client files: 0 hits). A cordis fiber that waits on a
+   * service which never arrives never activates, which surfaced as
+   * "web boot: 1 entry did not activate / dsh-compaction-vcc: import failed"
+   * and stopped the whole app from starting.
+   *
+   * `slots`, `locale`, `connection` and `remote` are real (56 / 59 / 29 / 52
+   * hits), so only the phantom dependency is dropped here. The settings card
+   * is optional UI: when no settings service is reachable, `apply` returns
+   * early and the engine keeps working with its row config.
+   */
+  var inject = ["slots", "locale", "connection", "remote"];
 
   function apply(ctx) {
     var t = ctx.locale.bind(NS);
     ctx.effect(function () { return ctx.locale.register(NS, { zh: zh, en: en }); }, "compaction-vcc: settings dictionary");
-    var controller = new CardController(ctx.settingsScope.bind({ namespace: SETTINGS_NAMESPACE }), [
+    // The settings card is a convenience surface, not a requirement: without a
+    // settings service the engine still compacts, and parameters stay editable
+    // in cordis.patch.yml.
+    var scope = ctx.settingsScope;
+    if (scope === undefined || typeof scope.bind !== "function") return;
+    var controller = new CardController(scope.bind({ namespace: SETTINGS_NAMESPACE }), [
       numberField("checkpointCap"),
       booleanField("auto"),
       numberField("thresholdRatio"),

@@ -18,7 +18,7 @@
 - id: compaction-basic
   disabled: true
 - insert:
-    - id: compaction-instant
+    - id: compaction-vcc
       name: dsh-compaction-vcc
     - id: tool-recall
       name: dsh-compaction-vcc/tool
