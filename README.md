@@ -273,9 +273,24 @@ MIT licensed.
 
 | Version | Status | Notes |
 |---|---|---|
-| **0.1.7** | ✅ current | Adds `engines.dsh`, corrects peer ranges to the host this fork is tested against. **This is the first version a stock host accepts without an exemption entry.** |
+| **0.2.0** | ✅ current | **Removes the `dsh.client` declaration entirely.** The optional settings card made the host create a web-boot entry that could never activate, and an entry that fails to activate aborts the whole web boot. This engine does not need any frontend, so the frontend is gone. |
+| 0.1.9 | ⚠️ deprecated | Tried to fix the activation failure by correcting `dsh.client.inject`. Import succeeded, the entry still never activated. **Fails to start on bundle installs.** |
+| 0.1.8 | ⚠️ deprecated | Dropped a `require` of a package that does not exist in the host. Still broken. |
+| 0.1.7 | ⚠️ deprecated | First version with a correct manifest, but its `client.js` requires `@deepseek-ai/dsh-client-runtime`, which the host does not ship. **Fails to start on bundle installs.** |
 | 0.1.6 | ⚠️ deprecated | Real release, but with the old manifest: no `engines.dsh` and `^0.1.0-rc.6` peers, so hosts skip it silently. |
 | 0.1.5 | ⚠️ deprecated | Same manifest problem as 0.1.6. |
 | 0.0.0-stage | scratch | Placeholder created while debugging the publish pipeline. Contains no code; nothing installs it. |
 
-When a host skips a bundle it does **not** crash — it drops it into `skippedBundles` and continues, so a wrong manifest looks exactly like a working install until you check that compaction actually ran. If you are on 0.1.5 or 0.1.6, upgrade.
+Two different failure modes are recorded above, and they behave nothing alike:
+
+- **A wrong manifest is silent.** The host drops the bundle into `skippedBundles` and keeps going, so it looks exactly like a working install until you check that compaction actually ran.
+- **A broken `dsh.client` is loud but fatal.** If `package.json` declares `dsh.client` with `platform: "web"`, the host is obliged to create a web-boot entry for it and to activate that entry. There is no fallback path: when activation fails, the entire web boot aborts and the app does not start:
+
+  ```
+  web boot: 1 entry did not activate
+  dsh-compaction-vcc: import failed | loading | pending (waiting for services: ...)
+  ```
+
+  Note that this only happens on **bundle installs** (`dsh plugin add`). A package-alias install never loads `dsh.client`, so the fault is invisible on a machine configured that way — which is exactly how 0.1.7 through 0.1.9 shipped broken.
+
+**If you are on anything below 0.2.0, upgrade.** The three broken releases are deprecated on npm.
