@@ -170,6 +170,55 @@ dsh plugin --profile web add <spec>
 
 `dsh-command-compact` (`/compact`) is backend-independent, so it keeps working unchanged in every method.
 
+### ⚠️ Read this first: the wrong install fails silently
+
+**If the host mounts any agent preset (`standard` / `ptc` / `minimal` / `cordis`),
+a plain `dsh plugin add dsh-compaction-vcc` is NOT enough.**
+
+Each preset is mounted in its own `isolate` realm, so the `compaction-basic` row
+inside a preset instantiates **its own** engine in that realm. The engine row this
+package inserts lives on the host plane and **cannot reach into a preset realm** —
+upstream `leakedServices` requires compaction services to stay inside the isolate
+realm and throws if one leaks out.
+
+The result is a silent half-install:
+
+| | State |
+|---|---|
+| `recall` / `search` tools | ✅ work (tool registration is global) |
+| `/recall` command | ✅ works |
+| **actual compaction** | ❌ **still the official basic (model call, summary)** |
+
+**There is exactly one way to tell** — the `provider` field on `compaction/summary`:
+
+```bash
+zstd -dc <session>.jsonl.zstd | python3 -c "
+import json,sys
+for line in sys.stdin:
+    line=line.strip()
+    if not line: continue
+    o=json.loads(line)
+    if o.get('type')=='compaction/summary':
+        d=o['data']
+        print(o['seq'], d.get('provider'), d.get('model'), 'llm=',d.get('llmStreamCall'))
+"
+```
+
+- `provider = dsh-compaction-vcc` / `model = vcc-compiler` → ✅ correct
+- `provider` is a chat model (e.g. `zlwb-pool-vision`), `llmStreamCall: true` → ❌ **still basic**
+
+**Since 0.2.1 the engine runs this check itself after mount and logs an explicit
+`warn` when a preset kept the summarizer**, instead of leaving you to guess. The
+switch is `warnOnPresetTakeover` (default `true`).
+
+On a host that mounts presets use **Method 1** (recommended), or Method 2 / 3
+(which edit presets). A host without presets can install directly.
+
+> Not sure whether you mount presets? Check whether the profile's
+> `dsh.profile.bundles` includes `@deepseek-ai/dsh-web-app` (it inserts
+> `agent-preset-registry` with `config.default: standard`), or run
+> `dsh --profile <name> --dump-config | grep -c "preset-"`.
+
 ### Method 1 — Drop-in replace the built-in engine (alias)
 
 ```bash
@@ -273,7 +322,8 @@ MIT licensed.
 
 | Version | Status | Notes |
 |---|---|---|
-| **0.2.0** | ✅ current | **Removes the `dsh.client` declaration entirely.** The optional settings card made the host create a web-boot entry that could never activate, and an entry that fails to activate aborts the whole web boot. This engine does not need any frontend, so the frontend is gone. |
+| **0.2.1** | ✅ current | **Fixes the silent preset failure.** When the host mounts agent presets, each preset owns an engine instance inside its own `isolate` realm, so the host-plane row this package inserts can never reach it — compaction **silently falls back to the official basic** while the recall tools keep working. This release self-checks preset takeover after mount and logs a `warn` when a preset kept the summarizer; switch is `warnOnPresetTakeover`. Adds 15 preset-scenario tests. **Engine behavior is unchanged — it just stops being silent.** |
+| 0.2.0 | ✅ usable | **Removes the `dsh.client` declaration entirely.** The optional settings card made the host create a web-boot entry that could never activate, and an entry that fails to activate aborts the whole web boot. This engine does not need any frontend, so the frontend is gone. |
 | 0.1.9 | ⚠️ deprecated | Tried to fix the activation failure by correcting `dsh.client.inject`. Import succeeded, the entry still never activated. **Fails to start on bundle installs.** |
 | 0.1.8 | ⚠️ deprecated | Dropped a `require` of a package that does not exist in the host. Still broken. |
 | 0.1.7 | ⚠️ deprecated | First version with a correct manifest, but its `client.js` requires `@deepseek-ai/dsh-client-runtime`, which the host does not ship. **Fails to start on bundle installs.** |

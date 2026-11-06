@@ -19,6 +19,7 @@ import { CONTEXT_WINDOW_EXCEEDED_CODE } from "@deepseek-ai/dsh-llm";
 import { assertNever, deepFreeze } from "@deepseek-ai/dsh-util-values";
 import { compileNoisePatterns, compileRegion, COMPILER_REV, DEFAULT_ARG_TOOLS, DEFAULT_NOISE_PATTERNS, isCheckpointSource } from "./compiler.js";
 import { assertNoActiveCompaction, compactSurfaceRegion, selectCompactableRange } from "./region.js";
+import { checkPresetTakeover } from "./preset-check.js";
 import { sessionEventAt, sessionEvents } from "./session-compat.js";
 
 // ── configuration resolution ───────────────────────────────────────────────
@@ -70,7 +71,8 @@ const COMPILER_CONFIG_KEYS = [
   "toolArgTools",
   "hideTools",
   "debug",
-  "debugLogPath"
+  "debugLogPath",
+  "warnOnPresetTakeover"
 ];
 /** Remaining checkpoint-cap keys (top-level only). `checkpointScale` is deprecated-inert. */
 const MANUAL_CONFIG_KEYS = [
@@ -154,6 +156,7 @@ export function resolveConfig(config = {}) {
     toolKeyFields: resolveToolKeyFields(config.toolKeyFields),
     toolArgTools: resolveToolNameList(config.toolArgTools, DEFAULT_ARG_TOOLS, "toolArgTools"),
     hideTools: resolveToolNameList(config.hideTools, [], "hideTools"),
+    warnOnPresetTakeover: config.warnOnPresetTakeover ?? true,
     debug,
     debugLogPath,
     ...debug ? {
@@ -270,6 +273,7 @@ function validatePolicy(config, name) {
   }
   if (config.debug !== undefined && typeof config.debug !== "boolean") throw new Error(`${name}.debug must be a boolean`);
   if (config.debugLogPath !== undefined && typeof config.debugLogPath !== "string") throw new Error(`${name}.debugLogPath must be a string`);
+  if (config.warnOnPresetTakeover !== undefined && typeof config.warnOnPresetTakeover !== "boolean") throw new Error(`${name}.warnOnPresetTakeover must be a boolean`);
 }
 
 /** Detach a validated tool-name list (whitelist or hidden set). */
@@ -426,7 +430,8 @@ export class InstantCompactionEngine extends CompactionEngine {
     toolArgTools: z.array(z.string()),
     hideTools: z.array(z.string()),
     debug: z.boolean(),
-    debugLogPath: z.string()
+    debugLogPath: z.string(),
+    warnOnPresetTakeover: z.boolean()
   });
   /** Settings namespace for user-owned instant-compaction preferences. */
   static SETTINGS_NAMESPACE = "compaction-vcc";
@@ -458,6 +463,32 @@ export class InstantCompactionEngine extends CompactionEngine {
     this._autoActive = false;
     this._installSettingsSection(ctx);
     this._syncAuto();
+    this._schedulePresetTakeoverCheck(ctx);
+  }
+  /**
+   * Report presets that kept their own summarizer engine.
+   *
+   * Each preset mounts an isolated compaction realm, so this host-plane engine
+   * cannot replace a preset's summarizer row. Installed without the alias (or
+   * without rewriting the preset row) compaction silently stays on the model
+   * summarizer while the recall tools keep working. Check once after the
+   * registry settles and warn loudly instead of failing silently.
+   *
+   * The registry is optional: a host with no `agentPresets` service has no
+   * preset overrides, so this engine is authoritative and no warning is due.
+   * @param ctx - engine context.
+   */
+  _schedulePresetTakeoverCheck(ctx) {
+    const run = () => {
+      checkPresetTakeover(ctx, ctx.logger, this.config.warnOnPresetTakeover)
+        .catch(() => {
+          /* the self-check must never break the engine */
+        });
+    };
+    // Defer one microtask+turn: `agentPresets` mounts its presets
+    // asynchronously, so an immediate read would see an empty inventory.
+    const timer = setTimeout(run, 0);
+    if (typeof timer?.unref === "function") timer.unref();
   }
   /**
    * Re-resolve the engine configuration from the authoritative source (the

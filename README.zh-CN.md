@@ -168,6 +168,52 @@ dsh plugin --profile web add <spec>
 
 `/compact` 命令（`dsh-command-compact`）和用哪个引擎无关，任何安装方式下都照常工作。
 
+### ⚠️ 先读这一段：装不对会「静默失效」
+
+**如果你的宿主挂载了 agent preset（`standard` / `ptc` / `minimal` / `cordis` 任何一个），
+直接 `dsh plugin add dsh-compaction-vcc` 是不够的。**
+
+原因：每个 preset 用 `isolate` 挂在自己独立的 realm 里，preset 内那条
+`compaction-basic` 会在**它自己的 realm 内**实例化一个引擎。本包插在宿主层的那一行
+**进不去 preset 的 realm**（上游 `leakedServices` 强制要求压缩服务待在 isolate
+realm 里，从外部注入会直接报错）。
+
+结果就是**静默失效**：
+
+| | 状态 |
+|---|---|
+| `recall` / `search` 工具 | ✅ 能用（工具注册是全局的） |
+| `/recall` 命令 | ✅ 能用 |
+| **实际压缩** | ❌ **还是官方 basic 在跑（调模型、出摘要）** |
+
+**判断依据只有一个**——看 `compaction/summary` 事件的 `provider` 字段：
+
+```bash
+zstd -dc <session>.jsonl.zstd | python3 -c "
+import json,sys
+for line in sys.stdin:
+    line=line.strip()
+    if not line: continue
+    o=json.loads(line)
+    if o.get('type')=='compaction/summary':
+        d=o['data']
+        print(o['seq'], d.get('provider'), d.get('model'), 'llm=',d.get('llmStreamCall'))
+"
+```
+
+- `provider = dsh-compaction-vcc` / `model = vcc-compiler` → ✅ 正常
+- `provider` 是聊天模型（如 `zlwb-pool-vision`）、`llmStreamCall: true` → ❌ **还走的是 basic**
+
+**0.2.1 起本引擎会自己在启动后做这项检查，发现 preset 没接管就在日志里打一条
+明确的 `warn`**，不再让你靠猜。开关是 `warnOnPresetTakeover`（默认 `true`）。
+
+挂载了 preset 时，请用**方法 1**（推荐），或方法 2 / 3（要改动预设）。
+没有挂载 preset 的宿主，直接装即可。
+
+> 怎么知道自己有没有挂 preset？看 profile 的 `dsh.profile.bundles` 里有没有
+> `@deepseek-ai/dsh-web-app`（它插入了 `agent-preset-registry`，`config.default: standard`），
+> 或运行 `dsh --profile <name> --dump-config | grep -c "preset-"`。
+
 ### 方法 1 —— 顶替内置引擎（别名安装）
 
 ```bash
@@ -271,7 +317,8 @@ MIT 许可证。
 
 | 版本 | 状态 | 说明 |
 |---|---|---|
-| **0.2.0** | ✅ 当前 | **把 `dsh.client` 声明整个删掉。** 那张可选设置卡片会让宿主建一条永远激活不了的前端行，而激活失败会**中止整个 web boot**。这个引擎本来就不需要前端，所以前端没了。 |
+| **0.2.1** | ✅ 当前 | **修「预设场景静默失效」**：宿主挂了 agent preset 时，preset 在自己的 isolate realm 里另有引擎实例，本包插在宿主层的那行进不去，压缩**静默回落到官方 basic**（工具却照常可用）。本版启动后自检 preset 接管情况并打 `warn`，开关 `warnOnPresetTakeover`。补 15 条 preset 场景测试。**引擎行为未变，只是不再静默。** |
+| 0.2.0 | ✅ 可用 | **把 `dsh.client` 声明整个删掉。** 那张可选设置卡片会让宿主建一条永远激活不了的前端行，而激活失败会**中止整个 web boot**。这个引擎本来就不需要前端，所以前端没了。 |
 | 0.1.9 | ⚠️ 已弃用 | 想靠修正 `dsh.client.inject` 解决激活失败。import 通了，行还是没激活。**bundle 装法起不来。** |
 | 0.1.8 | ⚠️ 已弃用 | 去掉了对宿主里不存在的包的 `require`。仍然是坏的。 |
 | 0.1.7 | ⚠️ 已弃用 | 第一个清单正确的版本，但 `client.js` 里 `require` 了宿主根本不带的 `@deepseek-ai/dsh-client-runtime`。**bundle 装法起不来。** |
