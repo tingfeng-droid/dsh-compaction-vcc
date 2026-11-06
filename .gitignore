@@ -7,3 +7,6 @@ compaction-debug.log
 *.patch
 *.diff
 *.tgz
+
+# npm 认证（含令牌，绝不入库）
+.npmrc
