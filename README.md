@@ -268,3 +268,14 @@ The package is dependency-light: `@deepseek-ai/schemastery` for the Config schem
 - Trade-off: the checkpoint can be less *dense* than an LLM summary for prose-heavy history (facts are truncated, not merged). The verbatim tail (`retainTurns`/`retainTokens`) is where active work lives, and everything else stays recoverable through `(seq N)` pointers + recall.
 
 MIT licensed.
+
+## Version history
+
+| Version | Status | Notes |
+|---|---|---|
+| **0.1.7** | ✅ current | Adds `engines.dsh`, corrects peer ranges to the host this fork is tested against. **This is the first version a stock host accepts without an exemption entry.** |
+| 0.1.6 | ⚠️ deprecated | Real release, but with the old manifest: no `engines.dsh` and `^0.1.0-rc.6` peers, so hosts skip it silently. |
+| 0.1.5 | ⚠️ deprecated | Same manifest problem as 0.1.6. |
+| 0.0.0-stage | scratch | Placeholder created while debugging the publish pipeline. Contains no code; nothing installs it. |
+
+When a host skips a bundle it does **not** crash — it drops it into `skippedBundles` and continues, so a wrong manifest looks exactly like a working install until you check that compaction actually ran. If you are on 0.1.5 or 0.1.6, upgrade.
