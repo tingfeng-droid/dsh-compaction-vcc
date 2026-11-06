@@ -10,3 +10,7 @@ compaction-debug.log
 
 # npm 认证（含令牌，绝不入库）
 .npmrc
+
+# 本地备份
+__backup__*
+*.bak
