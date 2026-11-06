@@ -536,20 +536,25 @@ function instantCompactionClientFactory(require) {
   var SETTINGS_NAMESPACE = "compaction-vcc";
   /** Required services (cordis fiber inject). */
   /**
-   * ⚠️ 2026-11-06 (this fork) — `settingsScope` is NOT a host service.
+   * ⚠️ 2026-11-06 (this fork) — every service named here must be optional.
    *
-   * The previous declaration listed it, and nothing in the host provides it
-   * (grep across ~20.5k client files: 0 hits). A cordis fiber that waits on a
-   * service which never arrives never activates, which surfaced as
-   * "web boot: 1 entry did not activate / dsh-compaction-vcc: import failed"
-   * and stopped the whole app from starting.
+   * History: this list once carried `settingsScope`, a service no host package
+   * provides (grep across ~20.5k client files: 0 hits). A cordis fiber that
+   * injects a service that never arrives stays in FIBER_PENDING forever, which
+   * the host reports as "web boot: N entry did not activate" and the app never
+   * starts (see `applyPatches`/pending diagnostics in dsh-app-boot).
    *
-   * `slots`, `locale`, `connection` and `remote` are real (56 / 59 / 29 / 52
-   * hits), so only the phantom dependency is dropped here. The settings card
-   * is optional UI: when no settings service is reachable, `apply` returns
-   * early and the engine keeps working with its row config.
+   * Only `slots` and `locale` are load-bearing: the card registers into the
+   * `settings.plugin.item` slot and binds a locale dictionary. `apply` below
+   * degrades gracefully when the settings surface is absent, so no settings
+   * service is injected at all.
+   *
+   * `dsh.client.inject` in package.json must list the packages that PROVIDE
+   * these services (`dsh-client-ui-slots` for slots, `dsh-client-locale` for
+   * locale). Missing that list left the fiber pending even though the service
+   * names were spelled correctly.
    */
-  var inject = ["slots", "locale", "connection", "remote"];
+  var inject = ["slots", "locale"];
 
   function apply(ctx) {
     var t = ctx.locale.bind(NS);
