@@ -107,12 +107,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/TsFreddie/dsh-compaction-instant.git"
+    "url": "https://github.com/tingfeng-droid/dsh-compaction-vcc.git"
   },
   "bugs": {
-    "url": "https://github.com/TsFreddie/dsh-compaction-instant/issues"
+    "url": "https://github.com/tingfeng-droid/dsh-compaction-vcc/issues"
   },
-  "homepage": "https://github.com/TsFreddie/dsh-compaction-instant#readme",
+  "homepage": "https://github.com/tingfeng-droid/dsh-compaction-vcc#readme",
   "upstream": {
     "name": "dsh-compaction-instant",
     "author": "TsFreddie",

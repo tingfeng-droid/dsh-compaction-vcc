@@ -1,6 +1,6 @@
 # dsh-compaction-vcc
 
-> **This project is a fork of [TsFreddie/dsh-compaction-instant](https://github.com/TsFreddie/dsh-compaction-instant) (MIT)** — full credit to the original author.
+> **Maintained by [tingfeng-droid](https://github.com/tingfeng-droid).** Based on [TsFreddie/dsh-compaction-instant](https://github.com/TsFreddie/dsh-compaction-instant) (MIT) — full credit to the original author for the conversation-compiler design this project builds on.
 > Main changes: fixed host 0.2.2 compatibility where `toolCallId` moved from `content[0]` to the message, which silently dropped every `-> result N` pointer (see `src/compiler.js` / `src/session-compat.js`), plus a 100-test suite.
 
 [English](README.md) | [简体中文](README.zh-CN.md)
@@ -54,10 +54,10 @@ The package also ships the counterparts that close the near-lossless loop — **
 
 | Entry point | Module | What it does |
 |---|---|---|
-| `recall` **tool** (model-facing) | `dsh-compaction-instant/tool` | Typed restore: `type:"seq"` with `(seq N)`/`(seqs A-B)` markers, `type:"result"` with the `result N` pointer, `type:"checkpoint"` with a `[checkpoint N]` ordinal — restores exact original content into the current tool result |
-| `search` **tool** (model-facing, grep) | `dsh-compaction-instant/tool` | Keyword/regex search over the whole durable log — including content elided by compaction — returning matching events with their `(seq N)` pointers, ready for `recall` |
-| `/recall` **command** (human, grep) | `dsh-compaction-instant/command` | `/recall <keyword|regex>` appends a durable `form: "recall"` user message with the matching events and their seq pointers, so the next model turn sees them |
-| Shared cores | `dsh-compaction-instant/recall` + `dsh-compaction-instant/search` | Seq parsing (`12`, `3-7`, `seq 12` / `seqs 3-7`), log expansion, budgets, projection; regex compilation and hit rendering |
+| `recall` **tool** (model-facing) | `dsh-compaction-vcc/tool` | Typed restore: `type:"seq"` with `(seq N)`/`(seqs A-B)` markers, `type:"result"` with the `result N` pointer, `type:"checkpoint"` with a `[checkpoint N]` ordinal — restores exact original content into the current tool result |
+| `search` **tool** (model-facing, grep) | `dsh-compaction-vcc/tool` | Keyword/regex search over the whole durable log — including content elided by compaction — returning matching events with their `(seq N)` pointers, ready for `recall` |
+| `/recall` **command** (human, grep) | `dsh-compaction-vcc/command` | `/recall <keyword|regex>` appends a durable `form: "recall"` user message with the matching events and their seq pointers, so the next model turn sees them |
+| Shared cores | `dsh-compaction-vcc/recall` + `dsh-compaction-vcc/search` | Seq parsing (`12`, `3-7`, `seq 12` / `seqs 3-7`), log expansion, budgets, projection; regex compilation and hit rendering |
 
 Recall keeps **everything**: text, reasoning, raw tool-call arguments, nested tool-result content; log-only events render as labeled data dumps; missing seqs are reported; a `maxRecallTokens` budget (default **16000**) cuts with a provenance marker and counts the skipped remainder; searches cap shown hits (`maxSearchHits`, default **50**). Both plugins are separate rows, so they can be mounted next to **any** compaction backend — they only read the durable log.
 
@@ -97,7 +97,7 @@ Budgets are enforced twice — by token count and by a `budget × 4` character c
 
 ### Browser settings card (Settings → Plugins)
 
-Since 0.1.4 the engine exposes a **user-owned settings namespace** (`compaction-instant`) on every deployment that composes the settings domain (the standard web/desktop profiles do). The editable subset, persisted to `settings.yaml` and layered **over** the plugin row's cordis config:
+The engine exposes a **user-owned settings namespace** (`compaction-vcc`) on every deployment that composes the settings domain (the standard web/desktop profiles do). The editable subset, persisted to `settings.yaml` and layered **over** the plugin row's cordis config:
 
 | Field | Meaning |
 |---|---|
@@ -162,7 +162,7 @@ Budget scan (same 2.5M-token tool-dense session): with the 64K default cap, the 
 
 ## Installation
 
-All three methods below install the package (published to npm as `dsh-compaction-instant`) with the harness's own plugin manager (which runs pnpm inside the profile directory, making the package resolvable to both the host composition and every agent preset):
+All three methods below install the package (published to npm as `dsh-compaction-vcc`) with the harness's own plugin manager (which runs pnpm inside the profile directory, making the package resolvable to both the host composition and every agent preset):
 
 ```bash
 dsh plugin --profile web add <spec>
@@ -173,7 +173,7 @@ dsh plugin --profile web add <spec>
 ### Method 1 — Drop-in replace the built-in engine (alias)
 
 ```bash
-dsh plugin --profile web add "@deepseek-ai/dsh-compaction-basic@npm:dsh-compaction-instant"
+dsh plugin --profile web add "@deepseek-ai/dsh-compaction-basic@npm:dsh-compaction-vcc"
 ```
 
 **dsh currently has no way to choose the compaction engine**, and the built-in agent presets (`standard`, `code`, `cordis`) pin the package name `@deepseek-ai/dsh-compaction-basic` in their compositions. To use this engine inside those built-in presets you therefore **masquerade as the built-in plugin**: preset rows resolve bare package names from the profile's `node_modules` (which outranks the harness installation), so installing our package under the built-in name makes every built-in preset load this engine automatically — no preset files are touched, and preset upgrades keep working.
@@ -197,21 +197,21 @@ This install is **not** recognized as a bundle (the harness resolves the name `@
 ### Method 2 — Direct install + AI-authored preset copy (dsh authoring mode)
 
 ```bash
-dsh plugin --profile web add dsh-compaction-instant
+dsh plugin --profile web add dsh-compaction-vcc
 ```
 
 Then open a session with the preset-authoring preset (the shipped `cordis` preset, "creation mode") and ask the AI to:
 
-> Copy the `standard` preset and swap its compaction engine row to `dsh-compaction-instant`.
+> Copy the `standard` preset and swap its compaction engine row to `dsh-compaction-vcc`.
 
 The AI uses `agentPresets.copy('standard', '<id>')` to create a locally authored preset, swaps the compaction row's `name` in the copy, mount-validates it with `standingKeyFor('<id>')`, and can set it as the default by patching the `agent-presets` row (`config.default: <id>`). The new preset appears in the UI picker; the built-in presets stay untouched.
 
-Since v0.1.1 the package also declares `dsh.bundle`, so the direct install registers itself as a **profile layer automatically**: the built-in summarizer row is disabled and the instant engine + recall tools are inserted host-side (see `cordis.patch.yml` in the package). No manual patch rows needed for the host; only the preset copy above.
+The package declares `dsh.bundle`, so the direct install registers itself as a **profile layer automatically**: the built-in summarizer row is disabled and the instant engine + recall tools are inserted host-side (see `cordis.patch.yml` in the package). No manual patch rows needed for the host; only the preset copy above.
 
 ### Method 3 — Direct install + manual preset configuration
 
 ```bash
-dsh plugin --profile web add dsh-compaction-instant
+dsh plugin --profile web add dsh-compaction-vcc
 mkdir -p "$DSH_HOME/.agent-presets/<id>"
 # copy composition + metadata from the built-in preset you want as a base
 # (the preset roster lists every preset's real path):
@@ -230,7 +230,7 @@ Then hand-edit the copy's compaction group — one row name change, inside the s
     toolResultPruner: true      # the pruner must share this realm
   config:
     - id: compaction-instant
-      name: dsh-compaction-instant   # was '@deepseek-ai/dsh-compaction-basic'
+      name: dsh-compaction-vcc   # was '@deepseek-ai/dsh-compaction-basic'
     - id: command-compact
       name: '@deepseek-ai/dsh-command-compact'
     # ... keep the pruner row

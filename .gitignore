@@ -6,3 +6,4 @@ compaction-debug.log
 # local review artifacts (generated)
 *.patch
 *.diff
+*.tgz

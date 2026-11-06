@@ -1,6 +1,6 @@
 # dsh-compaction-vcc
 
-> **本项目是 [TsFreddie/dsh-compaction-instant](https://github.com/TsFreddie/dsh-compaction-instant)（MIT）的 fork**，在此致谢原作者。
+> **本项目由 [tingfeng-droid](https://github.com/tingfeng-droid) 维护。** 基于 [TsFreddie/dsh-compaction-instant](https://github.com/TsFreddie/dsh-compaction-instant)（MIT）——"对话编译"这一设计出自原作者，在此致谢。
 > 主要改动：修复 host 0.2.2 下 `toolCallId` 字段位置变化导致 `-> result N` 指针静默丢失的兼容性问题（见 `src/compiler.js` / `src/session-compat.js`），并补齐 100 项测试。
 
 为 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 打造的**即时、近无损上下文压缩**引擎——**装上就能直接替换官方引擎 `@deepseek-ai/dsh-compaction-basic`**，用 [lllyasviel/VCC](https://github.com/lllyasviel/VCC) 的"对话编译"思路取代原来的 LLM 摘要。
@@ -52,10 +52,10 @@ next question
 
 | 入口 | 模块 | 作用 |
 |---|---|---|
-| `recall` **工具**（给模型用） | `dsh-compaction-instant/tool` | 按类型恢复原文：`type:"seq"` 配合 `(seq N)`/`(seqs A-B)` 标记，`type:"result"` 配合 `result N` 指针，`type:"checkpoint"` 配合 `[checkpoint N]` 序号——把原始内容一字不差地恢复到当前工具结果里 |
-| `search` **工具**（给模型用，grep） | `dsh-compaction-instant/tool` | 在整个持久日志里按关键词/正则搜索——包括被压缩掉的内容——返回带 `(seq N)` 指针的匹配事件，可直接交给 `recall` 取回 |
-| `/recall` **命令**（给人用，grep） | `dsh-compaction-instant/command` | `/recall <关键词|正则>` 追加一条持久的用户消息，内含匹配事件和 seq 指针，下一轮模型就能看到 |
-| 共享核心 | `dsh-compaction-instant/recall` + `dsh-compaction-instant/search` | seq 解析（`12`、`3-7`、`seq 12` / `seqs 3-7`）、日志展开、预算、字段筛选；正则编译与命中展示 |
+| `recall` **工具**（给模型用） | `dsh-compaction-vcc/tool` | 按类型恢复原文：`type:"seq"` 配合 `(seq N)`/`(seqs A-B)` 标记，`type:"result"` 配合 `result N` 指针，`type:"checkpoint"` 配合 `[checkpoint N]` 序号——把原始内容一字不差地恢复到当前工具结果里 |
+| `search` **工具**（给模型用，grep） | `dsh-compaction-vcc/tool` | 在整个持久日志里按关键词/正则搜索——包括被压缩掉的内容——返回带 `(seq N)` 指针的匹配事件，可直接交给 `recall` 取回 |
+| `/recall` **命令**（给人用，grep） | `dsh-compaction-vcc/command` | `/recall <关键词|正则>` 追加一条持久的用户消息，内含匹配事件和 seq 指针，下一轮模型就能看到 |
+| 共享核心 | `dsh-compaction-vcc/recall` + `dsh-compaction-vcc/search` | seq 解析（`12`、`3-7`、`seq 12` / `seqs 3-7`）、日志展开、预算、字段筛选；正则编译与命中展示 |
 
 Recall 能取回**一切**：文本、推理过程、工具调用的完整参数、嵌套的工具结果；只在日志里出现过的事件会以带标签的原始数据展示；找不到的 seq 会明确报错。`maxRecallTokens` 预算（默认 **16000**）超限时会截断并标注来源、统计跳过多少；搜索限制展示条数（`maxSearchHits`，默认 **50**）。这两个插件是独立的一行，可以挂在**任何**压缩引擎旁边——它们只读日志，不依赖本引擎。
 
@@ -95,7 +95,7 @@ recall 工具和命令插件各自接受 `{ maxRecallTokens?: 16000, maxSearchHi
 
 ### 浏览器设置卡片（设置 → 插件）
 
-从 0.1.4 起，引擎在**任何装配了 settings 域**的部署（标准 web/desktop profile 都有）上暴露一个用户设置命名空间（`compaction-instant`）。可编辑子集持久化到 `settings.yaml`，**叠加在**插件行的 cordis 配置之上：
+引擎在**任何装配了 settings 域**的部署（标准 web/desktop profile 都有）上暴露一个用户设置命名空间（`compaction-vcc`）。可编辑子集持久化到 `settings.yaml`，**叠加在**插件行的 cordis 配置之上：
 
 | 字段 | 含义 |
 |---|---|
@@ -160,7 +160,7 @@ recall 工具和命令插件各自接受 `{ maxRecallTokens?: 16000, maxSearchHi
 
 ## 安装
 
-下面三种方法都用 Harness 自带的插件管理器安装（包发布在 npm，名字 `dsh-compaction-instant`；插件管理器会在 profile 目录里跑 pnpm，装完后宿主配置和每个 agent preset 都能找到它）：
+下面三种方法都用 Harness 自带的插件管理器安装（包发布在 npm，名字 `dsh-compaction-vcc`；插件管理器会在 profile 目录里跑 pnpm，装完后宿主配置和每个 agent preset 都能找到它）：
 
 ```bash
 dsh plugin --profile web add <spec>
@@ -171,7 +171,7 @@ dsh plugin --profile web add <spec>
 ### 方法 1 —— 顶替内置引擎（别名安装）
 
 ```bash
-dsh plugin --profile web add "@deepseek-ai/dsh-compaction-basic@npm:dsh-compaction-instant"
+dsh plugin --profile web add "@deepseek-ai/dsh-compaction-basic@npm:dsh-compaction-vcc"
 ```
 
 **dsh 目前没法让你选压缩引擎**，内置预设（`standard`、`code`、`cordis`）在配置里写死了包名 `@deepseek-ai/dsh-compaction-basic`。要让这些内置预设用上本引擎，就**顶替**内置插件：预设配置里的包名是从 profile 的 `node_modules` 解析的（优先级高于 Harness 自带的安装），所以把本包装到内置这个名字下面，所有内置预设就会自动加载本引擎——不动任何预设文件，预设以后升级也不受影响。
@@ -195,21 +195,21 @@ dsh plugin --profile web add "@deepseek-ai/dsh-compaction-basic@npm:dsh-compacti
 ### 方法 2 —— 直接安装 + 让 AI 复制一份预设（dsh 创作模式）
 
 ```bash
-dsh plugin --profile web add dsh-compaction-instant
+dsh plugin --profile web add dsh-compaction-vcc
 ```
 
 然后用"预设创作"预设（内置的 `cordis` 预设，即「创造模式」）开一个会话，让 AI 执行：
 
-> 复制 `standard` 预设，把它的压缩引擎行换成 `dsh-compaction-instant`。
+> 复制 `standard` 预设，把它的压缩引擎行换成 `dsh-compaction-vcc`。
 
 AI 会用 `agentPresets.copy('standard', '<id>')` 创建一份本地预设，在副本里改掉压缩行的 `name`，用 `standingKeyFor('<id>')` 校验能不能正常挂载，还可以通过改 `agent-presets` 行（`config.default: <id>`）把它设为默认。新预设会出现在 UI 选择器里；内置预设不受影响。
 
-从 v0.1.1 起，本包还声明了 `dsh.bundle`，所以直接安装会自动注册成 profile 的配置层：自动禁掉内置的摘要引擎行、自动插入本引擎和 recall 工具（见包内 `cordis.patch.yml`）。宿主这边不用手动配置，只需复制预设。
+本包声明了 `dsh.bundle`，所以直接安装会自动注册成 profile 的配置层：自动禁掉内置的摘要引擎行、自动插入本引擎和 recall 工具（见包内 `cordis.patch.yml`）。宿主这边不用手动配置，只需复制预设。
 
 ### 方法 3 —— 直接安装 + 手动配置预设
 
 ```bash
-dsh plugin --profile web add dsh-compaction-instant
+dsh plugin --profile web add dsh-compaction-vcc
 mkdir -p "$DSH_HOME/.agent-presets/<id>"
 # 从你想作为基础的内置预设复制配置和元数据
 # （预设列表里能看到每个预设的真实路径）：
@@ -228,7 +228,7 @@ cp <built-in-preset>/agent.cordis.yml "$DSH_HOME/.agent-presets/<id>/agent.cordi
     toolResultPruner: true      # pruner 必须和引擎在同一隔离域
   config:
     - id: compaction-instant
-      name: dsh-compaction-instant   # 原来是 '@deepseek-ai/dsh-compaction-basic'
+      name: dsh-compaction-vcc   # 原来是 '@deepseek-ai/dsh-compaction-basic'
     - id: command-compact
       name: '@deepseek-ai/dsh-command-compact'
     # ... 保留 pruner 行
