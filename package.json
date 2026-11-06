@@ -1,6 +1,6 @@
 {
   "name": "dsh-compaction-vcc",
-  "version": "0.1.9",
+  "version": "0.2.0",
   "description": "VCC-style instant, near-lossless deterministic compaction engine for the DeepSeek Harness — a drop-in replacement for @deepseek-ai/dsh-compaction-basic. Fork of TsFreddie/dsh-compaction-instant (MIT) with host 0.2.2 toolCallId compatibility fixes.",
   "type": "module",
   "main": "src/index.js",
@@ -95,16 +95,6 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
-    },
-    "client": {
-      "platform": "web",
-      "inject": [
-        "@deepseek-ai/dsh-client-connection",
-        "@deepseek-ai/dsh-client-locale",
-        "@deepseek-ai/dsh-client-ui-settings",
-        "@deepseek-ai/dsh-client-ui-slots",
-        "@deepseek-ai/dsh-api-remotes"
-      ]
     }
   },
   "repository": {
