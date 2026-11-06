@@ -25,44 +25,45 @@ import {
   readInventory
 } from "../src/preset-check.js";
 
-/** Build the `compaction` group row exactly as a bundled preset declares it. */
-function compactionGroup(engineRow) {
-  return {
-    id: "compaction",
-    name: "cordis:group",
-    group: true,
-    isolate: { compaction: true, toolResultPruner: true },
-    config: [
-      engineRow,
-      { id: "command-compact", name: "@deepseek-ai/dsh-command-compact" },
-      {
-        id: "tool-result-pruner",
-        name: "@deepseek-ai/dsh-compaction-tool-result-pruner",
-        config: { thresholdChars: 8192 }
-      }
-    ]
-  };
+/**
+ * Build one FLATTENED composition row exactly as the harness reports it.
+ *
+ * `compositionInventory()` does NOT return raw Cordis entries. It returns
+ * `definitionComposition()` / `mountedCompositionRows()` output, whose fields
+ * are `{ entryId, moduleName, enabled }` — groups are already flattened away
+ * (see `flattenRows` in dsh-agent-preset-registry). An earlier version of this
+ * test used `{ id, name, disabled }`, which the host never produces; it passed
+ * while the real audit silently saw zero engine rows.
+ */
+function row(entryId, moduleName, enabled = true) {
+  return { entryId, moduleName, enabled };
 }
 
-/** One preset record shaped like `compositionInventory()` output. */
+/**
+ * One preset record shaped like `compositionInventory()` output.
+ * `engineRow` is a single flattened row; the surrounding compaction-group
+ * members are already flattened beside it, which is what the host does.
+ */
 function preset(id, engineRow, extra = {}) {
   return {
     id,
     isDefault: extra.isDefault === true,
     rows: [
-      { id: "persona", name: "@deepseek-ai/dsh-persona" },
-      compactionGroup(engineRow),
-      { id: "tool-bash", name: "@deepseek-ai/dsh-tool-bash" }
+      row("persona", "@deepseek-ai/dsh-persona"),
+      engineRow,
+      row("command-compact", "@deepseek-ai/dsh-command-compact"),
+      row("tool-result-pruner", "@deepseek-ai/dsh-compaction-tool-result-pruner"),
+      row("tool-bash", "@deepseek-ai/dsh-tool-bash")
     ]
   };
 }
 
 /** The official summarizer row a bundled preset ships with. */
-const BASIC_ROW = { id: "compaction-basic", name: BASIC_PACKAGE };
+const BASIC_ROW = row("compaction-basic", BASIC_PACKAGE);
 /** A preset row rewritten to this engine (route 2). */
-const VCC_NAME_ROW = { id: "compaction-basic", name: ENGINE_PACKAGE };
+const VCC_NAME_ROW = row("compaction-basic", ENGINE_PACKAGE);
 /** A preset row inserted under this engine's own id (route 2 variant). */
-const VCC_ID_ROW = { id: "compaction-vcc", name: ENGINE_PACKAGE };
+const VCC_ID_ROW = row("compaction-vcc", ENGINE_PACKAGE);
 
 test("the host-plane bug reproduces: a bundled preset keeps the summarizer", () => {
   // This is the real-world failing state: vcc installed as a plain package,
@@ -147,10 +148,39 @@ test("a mixed install reports only the presets still on the summarizer", () => {
 
 test("a disabled engine row does not count as the active engine", () => {
   // A preset may carry the summarizer disabled; that is not an override.
-  const disabledBasic = { ...BASIC_ROW, disabled: true };
+  // Composition rows express this as `enabled: false`, not `disabled: true`.
+  const disabledBasic = row("compaction-basic", BASIC_PACKAGE, false);
   const audit = auditPresets([preset("standard", disabledBasic)]);
   assert.equal(presetsWithoutVcc(audit).length, 0, "no ACTIVE engine means no override");
   assert.equal(formatTakeoverWarning(audit), null);
+});
+
+test("a conditional engine row is not assumed active", () => {
+  // A `!!js` disabled expression resolves at mount time; the inventory reports
+  // "conditional". Treating that as active would report a preset as healthy
+  // when it may well be running the summarizer.
+  const conditionalBasic = { entryId: "compaction-basic", moduleName: BASIC_PACKAGE, enabled: "conditional" };
+  const audit = auditPresets([preset("standard", conditionalBasic)]);
+  assert.equal(audit[0].engines[0].active, false, "conditional is not active");
+  assert.equal(presetsWithoutVcc(audit).length, 0, "but it is also not an active summarizer");
+});
+
+test("raw Cordis entries are still accepted by the audit", () => {
+  // The same code path also runs against a config tree, where rows are
+  // `{ id, name, disabled }` — before flattening.
+  const raw = {
+    id: "standard",
+    isDefault: true,
+    rows: [{
+      id: "compaction",
+      name: "cordis:group",
+      group: true,
+      config: [{ id: "compaction-basic", name: BASIC_PACKAGE }]
+    }]
+  };
+  const offenders = presetsWithoutVcc(auditPresets([raw]));
+  assert.equal(offenders.length, 1, "a raw nested entry is still found");
+  assert.equal(offenders[0].engines[0].name, BASIC_PACKAGE);
 });
 
 test("nested group rows are flattened past the first level", () => {
@@ -248,4 +278,32 @@ test("a throwing logger never breaks the engine", async () => {
   };
   const offenders = await checkPresetTakeover(ctx, logger, true);
   assert.equal(offenders.length, 1, "the audit still completes");
+});
+
+test("the self-check survives every malformed context it may meet", async () => {
+  // This runs from a deferred timer inside a real host. Anything it throws
+  // becomes an unhandled rejection in the user's log, so the whole audit is
+  // fenced and must degrade to "nothing to report" instead of throwing.
+  const logger = { warn: () => {} };
+  const hostile = [
+    ["null ctx", null],
+    ["undefined ctx", undefined],
+    ["ctx without get", {}],
+    ["ctx.get throws", { get: () => { throw new Error("service store unavailable"); } }],
+    ["ctx.get returns a primitive", { get: () => 42 }],
+    ["registry without inventory", { get: () => ({}) }],
+    ["inventory throws", { get: () => ({ compositionInventory: () => { throw new Error("not ready"); } }) }]
+  ];
+  for (const [label, ctx] of hostile) {
+    assert.deepEqual(await checkPresetTakeover(ctx, logger, true), [], label);
+  }
+  assert.deepEqual(await checkPresetTakeover({ get: () => ({}) }, undefined, true), []);
+});
+
+test("readInventory never throws, whatever the context does", async () => {
+  assert.equal(await readInventory(null), undefined);
+  assert.equal(await readInventory(undefined), undefined);
+  assert.equal(await readInventory({}), undefined);
+  assert.equal(await readInventory({ get: () => { throw new Error("boom"); } }), undefined);
+  assert.equal(await readInventory({ get: () => "not a registry" }), undefined);
 });

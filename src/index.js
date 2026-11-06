@@ -480,15 +480,33 @@ export class InstantCompactionEngine extends CompactionEngine {
    */
   _schedulePresetTakeoverCheck(ctx) {
     const run = () => {
-      checkPresetTakeover(ctx, ctx.logger, this.config.warnOnPresetTakeover)
-        .catch(() => {
-          /* the self-check must never break the engine */
-        });
+      try {
+        checkPresetTakeover(ctx, ctx?.logger, this.config.warnOnPresetTakeover)
+          .then((offenders) => {
+            // Debug visibility matters here: a healthy install and a host with
+            // no presets both produce no warning, so the debug line is the only
+            // way to confirm the check actually ran.
+            if (Array.isArray(offenders) && offenders.length > 0) {
+              engineDebug(this.config, `preset takeover: ${offenders.length} preset(s) NOT using this engine [${offenders.map((o) => o.presetId).join(",")}]`);
+            } else {
+              engineDebug(this.config, "preset takeover: ok (no preset overrides compaction)");
+            }
+          })
+          .catch(() => {
+            /* the self-check must never break the engine */
+          });
+      } catch {
+        /* even calling it must be safe */
+      }
     };
-    // Defer one microtask+turn: `agentPresets` mounts its presets
-    // asynchronously, so an immediate read would see an empty inventory.
-    const timer = setTimeout(run, 0);
-    if (typeof timer?.unref === "function") timer.unref();
+    try {
+      // Defer one turn: `agentPresets` mounts its presets asynchronously, so an
+      // immediate read would see an empty inventory and report nothing.
+      const timer = setTimeout(run, 0);
+      if (typeof timer?.unref === "function") timer.unref();
+    } catch {
+      /* a host without timers simply skips the diagnostic */
+    }
   }
   /**
    * Re-resolve the engine configuration from the authoritative source (the

@@ -207,7 +207,7 @@ for line in sys.stdin:
 - `provider = dsh-compaction-vcc` / `model = vcc-compiler` → ✅ correct
 - `provider` is a chat model (e.g. `zlwb-pool-vision`), `llmStreamCall: true` → ❌ **still basic**
 
-**Since 0.2.1 the engine runs this check itself after mount and logs an explicit
+**Since 0.3.0 the engine runs this check itself after mount and logs an explicit
 `warn` when a preset kept the summarizer**, instead of leaving you to guess. The
 switch is `warnOnPresetTakeover` (default `true`).
 
@@ -322,7 +322,8 @@ MIT licensed.
 
 | Version | Status | Notes |
 |---|---|---|
-| **0.2.1** | ✅ current | **Fixes the silent preset failure.** When the host mounts agent presets, each preset owns an engine instance inside its own `isolate` realm, so the host-plane row this package inserts can never reach it — compaction **silently falls back to the official basic** while the recall tools keep working. This release self-checks preset takeover after mount and logs a `warn` when a preset kept the summarizer; switch is `warnOnPresetTakeover`. Adds 15 preset-scenario tests. **Engine behavior is unchanged — it just stops being silent.** |
+| **0.3.0** | ✅ current | **Fixes the silent preset failure.** When the host mounts agent presets, each preset owns an engine instance inside its own `isolate` realm, so the host-plane row this package inserts can never reach it — compaction **silently falls back to the official basic** while the recall tools keep working. This release self-checks preset takeover after mount and logs a `warn` when a preset kept the summarizer; switch is `warnOnPresetTakeover`. Adds 19 preset-scenario tests. **Engine behavior is unchanged — it just stops being silent.** |
+| 0.2.1 | ⚠️ deprecated | First attempt at the self-check, but it **read the wrong field names**: `compositionInventory()` reports `{entryId, moduleName, enabled}`, and reading `{id, name, disabled}` made the audit report "healthy" every time — worse than no check, because it looked like one. Also threw `TypeError` on four malformed-context paths. Use 0.3.0. |
 | 0.2.0 | ✅ usable | **Removes the `dsh.client` declaration entirely.** The optional settings card made the host create a web-boot entry that could never activate, and an entry that fails to activate aborts the whole web boot. This engine does not need any frontend, so the frontend is gone. |
 | 0.1.9 | ⚠️ deprecated | Tried to fix the activation failure by correcting `dsh.client.inject`. Import succeeded, the entry still never activated. **Fails to start on bundle installs.** |
 | 0.1.8 | ⚠️ deprecated | Dropped a `require` of a package that does not exist in the host. Still broken. |

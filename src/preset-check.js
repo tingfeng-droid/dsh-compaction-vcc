@@ -79,6 +79,39 @@ function isEnginePath(resolved) {
 }
 
 /**
+ * Read a composition row's fields regardless of which shape produced it.
+ *
+ * `agentPresets.compositionInventory()` returns two different row shapes:
+ *   - unmounted definition: `{ entryId, moduleName, enabled, condition? }`
+ *     (from `definitionComposition` → `flattenRows`),
+ *   - live mount: `{ entryId, moduleName, enabled, fiberState }`
+ *     (from `mountedCompositionRows`).
+ *
+ * A raw Cordis entry (`{ id, name, disabled }`) is accepted too so the audit
+ * can run against a config tree and a preset definition with one code path.
+ * @param row - a composition row in any of those shapes.
+ * @returns normalized `{ id, name, active }`.
+ */
+export function readRow(row) {
+  if (row === null || typeof row !== "object") return { id: "", name: "", active: false };
+  const id = typeof row.entryId === "string" ? row.entryId
+    : typeof row.id === "string" ? row.id : "";
+  const name = typeof row.moduleName === "string" ? row.moduleName
+    : typeof row.name === "string" ? row.name : "";
+  let active;
+  if (typeof row.enabled === "boolean") {
+    // Composition rows: `enabled` is already the combined verdict, but a
+    // conditional entry resolves at mount time and must not be assumed active.
+    active = row.enabled === true;
+  } else if (row.enabled === "conditional") {
+    active = false;
+  } else {
+    active = row.disabled !== true;
+  }
+  return { id, name, active };
+}
+
+/**
  * Whether one preset row belongs to this engine.
  *
  * A row counts as this engine when either:
@@ -90,15 +123,13 @@ function isEnginePath(resolved) {
  * NOT this engine: reporting a false alarm on an untouched install is worse
  * than staying quiet, because an untouched install is the dangerous state.
  *
- * @param row - a preset composition row (`{ id, name, ... }`).
+ * @param row - a preset composition row (see `readRow` for accepted shapes).
  * @param baseUrl - optional resolution base for the alias check.
  * @returns true when the row loads this engine.
  */
 export function isVccRow(row, baseUrl) {
-  if (row === null || typeof row !== "object") return false;
-  const name = typeof row.name === "string" ? row.name : "";
+  const { id, name } = readRow(row);
   if (name === ENGINE_PACKAGE || name.startsWith(`${ENGINE_PACKAGE}/`)) return true;
-  const id = typeof row.id === "string" ? row.id : "";
   if (id === "compaction-vcc" || id === "compaction-instant") return true;
   if (name === BASIC_PACKAGE || name.startsWith(`${BASIC_PACKAGE}/`)) {
     return isEnginePath(resolveRowPackage(name, baseUrl));
@@ -112,11 +143,10 @@ export function isVccRow(row, baseUrl) {
  * @returns true for a row that occupies the compaction seam.
  */
 export function isCompactionEngineRow(row) {
-  if (row === null || typeof row !== "object") return false;
-  const id = typeof row.id === "string" ? row.id : "";
-  const name = typeof row.name === "string" ? row.name : "";
+  const { id, name } = readRow(row);
   if (SUMMARY_ENGINE_HINTS.includes(id)) return true;
-  return SUMMARY_ENGINE_HINTS.some((hint) => name === hint || name.startsWith(`${hint}/`)) || name === ENGINE_PACKAGE || name === BASIC_PACKAGE;
+  if (name === ENGINE_PACKAGE || name === BASIC_PACKAGE) return true;
+  return SUMMARY_ENGINE_HINTS.some((hint) => name === hint || name.startsWith(`${hint}/`));
 }
 
 /**
@@ -156,12 +186,10 @@ export function auditPresets(inventory, baseUrl) {
       presetId: typeof preset.id === "string" ? preset.id : "?",
       isDefault: preset.isDefault === true,
       broken: preset.broken,
-      engines: engineRows.map((row) => ({
-        id: typeof row.id === "string" ? row.id : "",
-        name: typeof row.name === "string" ? row.name : "",
-        active: row.disabled !== true,
-        isVcc: isVccRow(row, baseUrl)
-      }))
+      engines: engineRows.map((row) => {
+        const { id, name, active } = readRow(row);
+        return { id, name, active, isVcc: isVccRow(row, baseUrl) };
+      })
     });
   }
   return audited;
@@ -224,7 +252,15 @@ export function formatTakeoverWarning(audit) {
  * @returns the inventory, or `undefined` when no preset registry is mounted.
  */
 export async function readInventory(ctx) {
-  const registry = ctx.get("agentPresets");
+  if (ctx === null || ctx === undefined) return undefined;
+  if (typeof ctx.get !== "function") return undefined;
+  let registry;
+  try {
+    registry = ctx.get("agentPresets");
+  } catch {
+    /* a context without a usable service store has no presets to audit */
+    return undefined;
+  }
   if (registry === undefined || registry === null) return undefined;
   if (typeof registry.compositionInventory !== "function") return undefined;
   try {
@@ -245,19 +281,25 @@ export async function readInventory(ctx) {
  */
 export async function checkPresetTakeover(ctx, logger, enabled) {
   if (enabled !== true) return [];
-  const inventory = await readInventory(ctx);
-  if (inventory === undefined) return [];
-  const baseUrl = readBaseUrl(ctx);
-  const audit = auditPresets(inventory, baseUrl);
-  const warning = formatTakeoverWarning(audit);
-  if (warning !== null) {
-    try {
-      logger.warn(warning);
-    } catch {
-      /* a failing logger must never break the engine */
+  try {
+    const inventory = await readInventory(ctx);
+    if (inventory === undefined) return [];
+    const baseUrl = readBaseUrl(ctx);
+    const audit = auditPresets(inventory, baseUrl);
+    const warning = formatTakeoverWarning(audit);
+    if (warning !== null) {
+      try {
+        logger?.warn?.(warning);
+      } catch {
+        /* a failing logger must never break the engine */
+      }
     }
+    return presetsWithoutVcc(audit);
+  } catch {
+    // The self-check is diagnostics only. A host shape it did not anticipate
+    // must never surface as an engine failure, so the whole audit is fenced.
+    return [];
   }
-  return presetsWithoutVcc(audit);
 }
 
 /**

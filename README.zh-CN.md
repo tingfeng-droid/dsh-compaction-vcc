@@ -204,7 +204,7 @@ for line in sys.stdin:
 - `provider = dsh-compaction-vcc` / `model = vcc-compiler` → ✅ 正常
 - `provider` 是聊天模型（如 `zlwb-pool-vision`）、`llmStreamCall: true` → ❌ **还走的是 basic**
 
-**0.2.1 起本引擎会自己在启动后做这项检查，发现 preset 没接管就在日志里打一条
+**0.3.0 起本引擎会自己在启动后做这项检查，发现 preset 没接管就在日志里打一条
 明确的 `warn`**，不再让你靠猜。开关是 `warnOnPresetTakeover`（默认 `true`）。
 
 挂载了 preset 时，请用**方法 1**（推荐），或方法 2 / 3（要改动预设）。
@@ -317,7 +317,8 @@ MIT 许可证。
 
 | 版本 | 状态 | 说明 |
 |---|---|---|
-| **0.2.1** | ✅ 当前 | **修「预设场景静默失效」**：宿主挂了 agent preset 时，preset 在自己的 isolate realm 里另有引擎实例，本包插在宿主层的那行进不去，压缩**静默回落到官方 basic**（工具却照常可用）。本版启动后自检 preset 接管情况并打 `warn`，开关 `warnOnPresetTakeover`。补 15 条 preset 场景测试。**引擎行为未变，只是不再静默。** |
+| **0.3.0** | ✅ 当前 | **修「预设场景静默失效」**：宿主挂了 agent preset 时，preset 在自己的 isolate realm 里另有引擎实例，本包插在宿主层的那行进不去，压缩**静默回落到官方 basic**（工具却照常可用）。本版启动后自检 preset 接管情况并打 `warn`，开关 `warnOnPresetTakeover`。补 19 条 preset 场景测试。**引擎行为未变，只是不再静默。** |
+| 0.2.1 | ⚠️ 已弃用 | 首次尝试加自检，但**读错了字段名**：`compositionInventory()` 返回的是 `{entryId, moduleName, enabled}`，我按 `{id, name, disabled}` 读，结果**永远判定「健康」**——比不检查更糟，因为它假装检查过。另有四处上下文缺字段时抛 `TypeError` 的路径。请用 0.3.0。 |
 | 0.2.0 | ✅ 可用 | **把 `dsh.client` 声明整个删掉。** 那张可选设置卡片会让宿主建一条永远激活不了的前端行，而激活失败会**中止整个 web boot**。这个引擎本来就不需要前端，所以前端没了。 |
 | 0.1.9 | ⚠️ 已弃用 | 想靠修正 `dsh.client.inject` 解决激活失败。import 通了，行还是没激活。**bundle 装法起不来。** |
 | 0.1.8 | ⚠️ 已弃用 | 去掉了对宿主里不存在的包的 `require`。仍然是坏的。 |
