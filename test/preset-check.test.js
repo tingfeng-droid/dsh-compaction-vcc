@@ -12,6 +12,9 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   auditPresets,
   BASIC_PACKAGE,
@@ -109,14 +112,72 @@ test("the alias install resolves the basic row to this engine", () => {
 });
 
 test("a row that resolves into this package via the alias path counts as ours", () => {
-  // Emulate the alias deployment: `require.resolve` of the bare basic name
-  // lands inside this package. The row text is unchanged, the verdict flips.
-  const baseUrl = `file://${process.cwd()}/`;
-  const row = { id: "compaction-basic", name: BASIC_PACKAGE };
-  // `readEngineResolution` is internal; assert the observable contract instead:
-  // a literal engine name is ours, an unresolvable basic name is not.
-  assert.equal(isVccRow({ id: "compaction-basic", name: ENGINE_PACKAGE }, baseUrl), true);
-  assert.equal(isVccRow(row, baseUrl), false, "basic does not resolve to vcc in this checkout");
+  // ⚠️ REGRESSION GUARD (2026-11-07, real incident). The first release of this
+  // check classified the alias install as "not taken over", because it tested
+  // the RESOLVED PATH for the substring `dsh-compaction-vcc`. The alias install
+  // places the package at `@deepseek-ai/dsh-compaction-basic/`, so that substring
+  // never appears and every healthy alias deployment was reported broken.
+  //
+  // The earlier version of this very test asserted
+  //   isVccRow(row, baseUrl) === false, "basic does not resolve to vcc"
+  // which encoded the bug as the expected result: the checkout has no alias
+  // directory, so `basic` fails to resolve and the path test never ran. The
+  // only way to catch this is to BUILD an alias layout and resolve against it.
+  const root = mkdtempSync(join(tmpdir(), "vcc-alias-"));
+  try {
+    const pkgDir = join(root, "node_modules", "@deepseek-ai", "dsh-compaction-basic");
+    mkdirSync(pkgDir, { recursive: true });
+    // The alias install copies THIS package into the basic directory, so the
+    // directory name and the manifest name deliberately disagree.
+    writeFileSync(
+      join(pkgDir, "package.json"),
+      JSON.stringify({ name: ENGINE_PACKAGE, version: "0.0.0-test", main: "index.js" }, null, 2)
+    );
+    writeFileSync(join(pkgDir, "index.js"), "export const engine = true;\n");
+
+    const baseUrl = `file://${root}/`;
+    const aliasRow = { id: "compaction-basic", name: BASIC_PACKAGE };
+
+    assert.equal(
+      isVccRow(aliasRow, baseUrl),
+      true,
+      "an alias install must be recognized by the manifest name, not the directory name"
+    );
+
+    // …and the same alias layout must satisfy the whole audit, not just one row.
+    const audit = auditPresets([preset("standard", aliasRow, { isDefault: true })], baseUrl);
+    assert.equal(presetsWithoutVcc(audit).length, 0, "a healthy alias install reports no offenders");
+    assert.equal(formatTakeoverWarning(audit), null, "a healthy alias install stays quiet");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the alias check still fails closed on an install that is NOT ours", () => {
+  // The mirror image of the guard above: a profile that resolves the basic name
+  // to the OFFICIAL summarizer must be reported, not waved through. Without this
+  // case a "return true" regression would pass the suite silently.
+  const root = mkdtempSync(join(tmpdir(), "vcc-official-"));
+  try {
+    const pkgDir = join(root, "node_modules", "@deepseek-ai", "dsh-compaction-basic");
+    mkdirSync(pkgDir, { recursive: true });
+    writeFileSync(
+      join(pkgDir, "package.json"),
+      JSON.stringify({ name: BASIC_PACKAGE, version: "0.0.0-test", main: "index.js" }, null, 2)
+    );
+    writeFileSync(join(pkgDir, "index.js"), "export const summarizer = true;\n");
+
+    const baseUrl = `file://${root}/`;
+    const officialRow = { id: "compaction-basic", name: BASIC_PACKAGE };
+
+    assert.equal(isVccRow(officialRow, baseUrl), false, "the official summarizer is not this engine");
+
+    const audit = auditPresets([preset("standard", officialRow, { isDefault: true })], baseUrl);
+    assert.equal(presetsWithoutVcc(audit).length, 1, "the summarizer install must be reported");
+    assert.match(formatTakeoverWarning(audit) ?? "", /did NOT take over/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("every bundled preset is audited, and the default is listed first", () => {

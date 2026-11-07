@@ -221,6 +221,141 @@ On a host that mounts presets use **Method 1** (recommended), or Method 2 / 3
 > `agent-preset-registry` with `config.default: standard`), or run
 > `dsh --profile <name> --dump-config | grep -c "preset-"`.
 
+### ⚠️ The second silent failure: two copies, one new and one old
+
+**You only hit this after switching install methods, or after trying several on
+one machine — but it is harder to diagnose than the one above.**
+
+The two install methods use **two different package names**:
+
+| Method | Package name (directory under `node_modules/`) |
+|---|---|
+| bundle install (`dsh plugin add dsh-compaction-vcc`) | `dsh-compaction-vcc` |
+| alias install (`add "@deepseek-ai/dsh-compaction-basic@npm:dsh-compaction-vcc"`) | `@deepseek-ai/dsh-compaction-basic` |
+
+**The key point: both names can genuinely be in use, and they are not the same thing.**
+
+- **The alias** (`@deepseek-ai/dsh-compaction-basic`) — every bundled preset
+  (`preset-standard` and friends) declares a row
+  `{ id: compaction-basic, name: "@deepseek-ai/dsh-compaction-basic" }` inside its
+  own `isolate` realm. **Presets only know that name.** The alias install is how
+  this package replaces the official summarizer for them.
+- **The real name** (`dsh-compaction-vcc`) — used by the host-plane
+  `- id: compaction-vcc` row, and by the `recall` / `search` tools.
+
+⇒ **The alias is not a leftover. Deleting it makes every preset fall back to the
+official LLM summarizer** — while `recall` / `search` keep working, so **nothing
+looks wrong**.
+
+**An upgrade overwrites only the name it targets**, leaving one new and one old:
+
+```
+node_modules/dsh-compaction-vcc/                 ← updated on every upgrade
+node_modules/@deepseek-ai/dsh-compaction-basic/  ← frozen at the first install
+```
+
+**Measured 2026-11-07 (1): two copies at different versions.** One machine had
+`dsh-compaction-vcc/` at 0.7.0 while `@deepseek-ai/dsh-compaction-basic/` still
+held **0.4.0**, installed at 19:59 the same evening. The host loaded 0.4.0; the
+checkpoint matched a 0.4.0 offline compile exactly (129 entries) where 0.7.0
+should have produced 185. Every static check during the investigation was green
+(version string, entry point, the `role === "tool"` branch all present) — only
+the actual output disagreed.
+
+**Measured 2026-11-07 (2): overcorrecting by deleting the alias.**
+On the same machine, after "fixing" case (1) by removing the alias, the next
+compaction's `compaction/summary` event reported `provider` as **a chat model**
+(`zlwb-pool-vision` / `deepseek-v4.1-flash`) instead of `dsh-compaction-vcc`, and
+the checkpoint body collapsed from ~80,000 characters of carried-over original
+text to a 5,000-character LLM summary — **83k tokens of conversation summarized
+into a few paragraphs**. That is the mechanism above: no alias, no takeover.
+
+**⇒ The fix is not to delete the alias. It is to bring BOTH copies to the same version.**
+
+#### How to check
+
+**Step 1: how many copies, and at what versions.**
+
+```bash
+find ~/.dsh/profiles/<profile>/node_modules -maxdepth 3 \
+  -path "*compaction*" -name package.json 2>/dev/null \
+  | while read f; do
+      python3 -c "import json;d=json.load(open('$f'));print('$(dirname $f)', '→', d['name'], d['version'])"
+    done
+```
+
+Two lines at the same version = healthy. Two lines at different versions = one is
+stale (**update it, do not delete it**). One line = check whether you have presets
+mounted (see the next section).
+
+**Step 2: who do the presets actually resolve to?**
+
+```bash
+cd ~/.dsh/profiles/<profile> && node -e '
+const {createRequire}=require("module");
+const r=createRequire("file://" + process.cwd() + "/");
+try{
+  const m=r("@deepseek-ai/dsh-compaction-basic/package.json");
+  console.log("alias resolves to:", m.name, m.version);
+  console.log(m.name==="dsh-compaction-vcc" ? "OK - presets will use this engine" : "BROKEN - presets will use the official summarizer");
+}catch(e){ console.log("BROKEN - alias does not resolve; every preset falls back to the official summarizer"); }
+'
+```
+
+**Step 3 (the strongest signal): the `provider` of the next compaction.**
+
+```bash
+zstd -dc ~/.dsh/sessions/<workspace>/session-<id>/session.v4.jsonl.zstd 2>/dev/null \
+  | python3 -c '
+import sys,json
+for line in sys.stdin:
+    try: o=json.loads(line)
+    except: continue
+    if o.get("type")=="compaction/summary":
+        d=o["data"]
+        kind="LLM summary (BAD)" if "llmStreamCall" in d else "VCC deterministic compile (GOOD)"
+        print(o["seq"], d["provider"], "|", kind)
+'
+```
+
+`provider` must read `dsh-compaction-vcc`. **Any chat model name means the official
+summarizer ran.**
+
+#### How to fix
+
+Bring both copies to the same version. **Do not delete the alias.**
+
+```bash
+TGZ=~/dsh-compaction-vcc/dsh-compaction-vcc-X.Y.Z.tgz
+for D in dsh-compaction-vcc @deepseek-ai/dsh-compaction-basic; do
+  T=~/.dsh/profiles/web/node_modules/$D
+  mkdir -p "$T" && tar xzf "$TGZ" -C "$T" --strip-components=1
+done
+```
+
+Both `file:` dependencies in `package.json` should point at the same tgz:
+
+```json
+"dsh-compaction-vcc": "file:.../dsh-compaction-vcc-X.Y.Z.tgz",
+"@deepseek-ai/dsh-compaction-basic": "file:.../dsh-compaction-vcc-X.Y.Z.tgz"
+```
+
+**Do not add the alias entry to `dsh.profile.bundles`** — it is only a stand-in
+name; listing it makes the host mount it a second time as an independent bundle.
+
+**From 0.7.2 the engine self-checks at startup** and prints a `warn` when another
+copy of the same package is installed at a different version. The self-check reads
+the **`name` field of the package manifest**, not the directory name — a mismatch
+between the two is the normal state of an alias install. (0.7.1 tested the resolved
+path string instead, which reported every healthy alias install as "not taken
+over"; 0.7.2 fixes that.)
+
+> **One-line takeaway**: if this package "does not change" after an upgrade, count
+> the copies under `node_modules`, compare their versions, **and look at the
+> `provider` of the next compaction**. A correct version string with old behavior
+> usually means the other copy was loaded; a `provider` that turned into a chat
+> model means the alias disappeared and the presets fell back to the summarizer.
+
 ### Method 1 — Drop-in replace the built-in engine (alias)
 
 ```bash
@@ -324,7 +459,9 @@ MIT licensed.
 
 | Version | Status | Notes |
 |---|---|---|
-| **0.7.0** | ✅ current | **Post-audit cleanup.** Removes `src/client.js` (621 lines / 28.4 kB of dead code — the `dsh.client` declaration was deleted in 0.2.0, so this browser half has had no entry point since), shrinking the package from 83.5 to 79.0 kB. The README section claiming a "browser settings card" contradicted the 0.2.0 removal note; it now reads "Settings namespace (no UI)". Version table backfilled for 0.4.0–0.6.1, which were missing entirely. `exports["./client"]` and the `check` script entry are gone too. |
+| **0.7.2** | ✅ current | **Corrects 0.7.1's wrong conclusion and fixes a self-check false alarm.** ① 0.7.1's README said "two copies installed? delete the alias". **That is wrong**: the alias is not a leftover — every bundled preset declares `{ id: compaction-basic, name: "@deepseek-ai/dsh-compaction-basic" }`, and **presets only know that name**. After deleting it, a measured `compaction/summary` reported `provider` as a chat model (the `llmStreamCall` marker appeared) and 83k tokens of conversation collapsed into a 5k-character summary. The right fix is **bring both copies to the same version; never delete the alias**. README section rewritten. ② `preset-check`'s `isEnginePath()` searched the **resolved path string** for `dsh-compaction-vcc`, but the alias install puts the package at `@deepseek-ai/dsh-compaction-basic/`, which never contains that substring ⇒ **every healthy alias install was reported as "not taken over"**. It now reads the package manifest's `name` field. ③ The old test asserted `assert.equal(isVccRow(row, baseUrl), false, "basic does not resolve to vcc")`, **encoding the bug as the expected result** — the test checkout has no alias directory, so the path test never even ran. It now builds a real alias layout before asserting, plus a reverse case proving the official summarizer is still reported. Tests 162 → 163. |
+| 0.7.1 | ⚠️ superseded by 0.7.2 | **Fixes "upgrade silently does nothing" when two copies are installed.** A machine that once used the alias install and later the bundle install ends up with two directories holding the same package (`dsh-compaction-vcc` and `@deepseek-ai/dsh-compaction-basic`), and an upgrade overwrites only one of them. The host may load the stale copy: the version reads new while the behavior is old, with no error anywhere. Measured: 0.7.0 and 0.4.0 side by side, 0.4.0 loaded. Adds a startup self-check (`src/shadow-check.js`) that warns when a second copy of the same package is present at a *different* version (same-version duplicates stay quiet). README gains a "second silent failure" section. ⚠️ **Two defects**: the cleanup steps said to delete the alias, which is the only name presets recognize — deleting it drops compaction onto the LLM summarizer; and `preset-check` tested the path string, reporting every healthy alias install as broken. **Use 0.7.2.** Tests 157 → 162. |
+| 0.7.0 | ✅ usable | **Post-audit cleanup.** Removes `src/client.js` (621 lines / 28.4 kB of dead code — the `dsh.client` declaration was deleted in 0.2.0, so this browser half has had no entry point since), shrinking the package from 83.5 to 79.0 kB. The README section claiming a "browser settings card" contradicted the 0.2.0 removal note; it now reads "Settings namespace (no UI)". Version table backfilled for 0.4.0–0.6.1, which were missing entirely. `exports["./client"]` and the `check` script entry are gone too. |
 | 0.6.1 | ✅ usable | **Two fixes, both of which silently broke the host or froze it.** (1) `isCheckpointSource` matched the wrong source shape: host 0.2.x emits `{kind:"compact-checkpoint"}`, but the code tested the legacy `{kind:"plugin", plugin:"compact"}` — a condition that can **never** be true, so the checkpoint branch never ran and `recall(type:"checkpoint")` could not find a single checkpoint (0 before, 5 after). (2) `parseSeqSpec` had no `Number.isSafeInteger` upper bound: `recall(type:"seq", id:"9007199254740992")` **spun forever, synchronously**, inside `expandSelections`'s `seq += 1` loop (at 2^53, `+1` does not change the value) — the tool never returns, no timer can fire, and the host must be restarted. Both the parser and the expander are guarded now, and `seq 0` is rejected. Also fixes three cases where one malformed node aborted an entire compile (`content` null, an array holding a null block, a non-array `content`) — each threw a `TypeError` and cost the whole compaction, which the host swallows as a warning (the symptom is "compaction simply does not happen"). Tests 137 → 149. |
 | 0.6.0 | ✅ usable | Elides injected bodies inside prior checkpoints (`elideCheckpointInjectedBodies`, default off). A checkpoint carries the memory snapshot and rules blocks that were live when it was compiled, and every compaction re-injects them — that copy is pure duplication. Enabling this replaces it with a one-line pointer; the originals stay in the append-only log and remain recallable. Measured 90,877 → 46,290 chars (−44,737). Adds `elideSourceKinds` (drop injected rows by source.kind). |
 | 0.5.0 | ✅ usable | Completes the 0.2.2 compatibility surface: after tool-result `toolCallId` moved from `content[0]` to the message level, the pre-pass that maps call ids to result seqs stopped matching — **silently** losing every `-> result N` pointer, which is what `recall(type:"result")` relies on. Also consolidates `session-compat` so both session shapes go through one accessor pair. |

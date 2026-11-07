@@ -1,6 +1,6 @@
 {
   "name": "dsh-compaction-vcc",
-  "version": "0.7.0",
+  "version": "0.7.2",
   "description": "VCC-style instant, near-lossless deterministic compaction engine for the DeepSeek Harness — a drop-in replacement for @deepseek-ai/dsh-compaction-basic. Fork of TsFreddie/dsh-compaction-instant (MIT) with host 0.2.2 toolCallId compatibility fixes.",
   "type": "module",
   "main": "src/index.js",
@@ -50,7 +50,7 @@
   ],
   "scripts": {
     "test": "node --test",
-    "check": "node --check src/index.js && node --check src/compiler.js && node --check src/region.js && node --check src/recall.js && node --check src/search.js && node --check src/tool.js && node --check src/command.js && node --check src/preset-check.js"
+    "check": "node --check src/index.js && node --check src/compiler.js && node --check src/region.js && node --check src/recall.js && node --check src/search.js && node --check src/tool.js && node --check src/command.js && node --check src/preset-check.js && node --check src/shadow-check.js && node --check src/session-compat.js"
   },
   "engines": {
     "node": ">=18",

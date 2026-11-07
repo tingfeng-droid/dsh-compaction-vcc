@@ -20,6 +20,7 @@ import { assertNever, deepFreeze } from "@deepseek-ai/dsh-util-values";
 import { compileNoisePatterns, compileRegion, COMPILER_REV, DEFAULT_ARG_TOOLS, DEFAULT_NOISE_PATTERNS, isCheckpointSource } from "./compiler.js";
 import { assertNoActiveCompaction, compactSurfaceRegion, selectCompactableRange } from "./region.js";
 import { checkPresetTakeover } from "./preset-check.js";
+import { describeShadowInstalls } from "./shadow-check.js";
 import { sessionEventAt, sessionEvents } from "./session-compat.js";
 
 // ── configuration resolution ───────────────────────────────────────────────
@@ -459,6 +460,31 @@ function engineDebug(config, line) {
   }
 }
 
+/** Fixed destination for the install-identity trace. */
+const DIAG_PATH = "/tmp/dsh-compaction-vcc-diag.log";
+/**
+ * Append one install-identity line to a fixed file.
+ *
+ * Why a separate file rather than `ctx.logger`: during the 2026-11-07 duplicate
+ * install incident neither `ctx.logger.info` nor `console.error` reached a
+ * readable place — the host log held only a few startup lines from other
+ * plugins — so "which build is actually running?" could not be answered at all.
+ * An append to a known path cannot be swallowed by a logger config.
+ *
+ * Gated on `debug` so ordinary runs do not litter `/tmp`; the file is truncated
+ * once per process so it reflects the current boot, not every boot forever.
+ *
+ * @param line - one diagnostic line.
+ */
+function diagLog(line) {
+  if (process.env.VCC_DIAG !== "1") return;
+  try {
+    appendFileSync(DIAG_PATH, `${new Date().toISOString()} pid=${process.pid} ${line}\n`, "utf8");
+  } catch {
+    /* diagnostics must never break the engine */
+  }
+}
+
 export class InstantCompactionEngine extends CompactionEngine {
   static inject = [
     "llm",
@@ -520,6 +546,27 @@ export class InstantCompactionEngine extends CompactionEngine {
     this.source = () => config;
     this.config = resolveConfig(config);
     engineDebug(this.config, `constructed rev=${COMPILER_REV} debugLog=${this.config.debugLogPath} argTools=[${this.config.toolArgTools.join(",")}] hideTools=[${this.config.hideTools.join(",")}]`);
+    // Install-identity trace (see diagLog): names the exact module file this
+    // process loaded, which is the one fact that cannot be determined from
+    // outside when two copies of the package coexist.
+    diagLog(
+      `LOADED file=${new URL(import.meta.url).pathname} rev=${COMPILER_REV} ` +
+      `userTextTokens=${this.config.userTextTokens} textTokens=${this.config.textTokens} ` +
+      `checkpointCap=${this.config.checkpointCap}`
+    );
+    // Duplicate-install self-check (see shadow-check.js). A stale sibling copy
+    // under the other install name makes an upgrade look applied while the old
+    // build keeps running, with no error anywhere. Say so once at startup
+    // instead of leaving it to be inferred from output.
+    const shadowWarning = describeShadowInstalls(import.meta.url);
+    if (shadowWarning !== undefined) {
+      diagLog(`SHADOW ${shadowWarning}`);
+      try {
+        ctx.logger.warn(`compaction-vcc: ${shadowWarning}`);
+      } catch {
+        /* a missing logger must not stop the engine */
+      }
+    }
     this._autoDisposer = null;
     this._autoActive = false;
     this._installSettingsSection(ctx);
@@ -768,6 +815,25 @@ export class InstantCompactionEngine extends CompactionEngine {
       checkpointOrdinals
     });
     engineDebug(this.config, `compile done entries=${entries.length} tokens=${stats.tokens} capped=${capped} toolCalls=${stats.toolCalls} toolResults=${stats.toolResults}`);
+    // Install-identity trace (see diagLog). The 2026-11-07 duplicate-install
+    // incident could not be diagnosed from outside the process: every static
+    // check was green while the behavior was a build three releases old. These
+    // numbers — the loaded file, the roles reaching the compiler, and how many
+    // `[tool]` rows came out — tell the two builds apart immediately.
+    if (process.env.VCC_DIAG === "1") {
+      const roleCounts = new Map();
+      for (const node of nodes) {
+        const role = node.message?.role ?? "<none>";
+        roleCounts.set(role, (roleCounts.get(role) ?? 0) + 1);
+      }
+      const toolRowCount = entries.filter((entry) => /^\[tool\]/.test(entry.text)).length;
+      diagLog(
+        `COMPILE file=${new URL(import.meta.url).pathname} rev=${COMPILER_REV} ` +
+        `nodes=${nodes.length} roles=[${[...roleCounts].map(([r, n]) => `${r}:${n}`).join(",")}] ` +
+        `toolResults=${stats.toolResults} toolRows=${toolRowCount} ` +
+        `entries=${entries.length} tokens=${stats.tokens} capped=${capped}`
+      );
+    }
     return {
       entries,
       stats,

@@ -30,6 +30,8 @@
  * @module dsh-compaction-vcc/preset-check
  */
 import { createRequire } from "node:module";
+import { readFileSync } from "node:fs";
+import { dirname, join, parse } from "node:path";
 
 /** Package name this engine ships under. */
 export const ENGINE_PACKAGE = "dsh-compaction-vcc";/** Bare name bundled presets declare for the official summarizer row. */
@@ -68,14 +70,43 @@ function resolveRowPackage(name, baseUrl) {
 
 /**
  * Whether a resolved path belongs to this engine's package.
- * The package's own sources live in `<pkg>/src/`, so a path segment test is
- * enough and stays correct for both the real name and the alias.
+ *
+ * A path-string test is NOT reliable here, and assuming it was is what made the
+ * first release of this check lie. The alias install copies the package into
+ * `node_modules/@deepseek-ai/dsh-compaction-basic/`, so the resolved path
+ * contains `dsh-compaction-basic`, never `dsh-compaction-vcc` — a substring
+ * test therefore reported every healthy alias deployment as "not taken over".
+ *
+ * The authoritative answer is the package MANIFEST: `package.json#name` stays
+ * `dsh-compaction-vcc` no matter which directory the package was installed
+ * under, which is exactly the property the alias install relies on.
+ *
+ * Walk up from the resolved entry file looking for that manifest, bounded so a
+ * pathological tree cannot hang startup.
+ *
  * @param resolved - absolute path from `require.resolve`, if any.
- * @returns true when the path is inside this package.
+ * @returns true when the owning package's manifest names this engine.
  */
 function isEnginePath(resolved) {
   if (typeof resolved !== "string") return false;
-  return resolved.includes(`/${ENGINE_PACKAGE}/`) || resolved.includes(`\\${ENGINE_PACKAGE}\\`);
+  let dir = dirname(resolved);
+  const { root } = parse(dir);
+  // Bounded walk: an installed package sits at most a few levels below the
+  // `node_modules` root, and a missing manifest must not mean an endless loop.
+  for (let hop = 0; hop < 8; hop += 1) {
+    try {
+      const raw = readFileSync(join(dir, "package.json"), "utf8");
+      const parsed = JSON.parse(raw);
+      if (typeof parsed?.name === "string") return parsed.name === ENGINE_PACKAGE;
+    } catch {
+      /* no manifest at this level — keep walking up */
+    }
+    if (dir === root) break;
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return false;
 }
 
 /**

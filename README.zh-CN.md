@@ -216,6 +216,129 @@ for line in sys.stdin:
 > `@deepseek-ai/dsh-web-app`（它插入了 `agent-preset-registry`，`config.default: standard`），
 > 或运行 `dsh --profile <name> --dump-config | grep -c "preset-"`。
 
+### ⚠️ 第二种静默失效：两份副本，一份新一份旧
+
+**只在你「换过安装方式」或「同一台机器试过多种装法」时会遇到，但它比上一条更难查。**
+
+两种装法用的是**两个不同的包名**：
+
+| 装法 | 包名（`node_modules/` 下的目录） |
+|---|---|
+| bundle 装法（`dsh plugin add dsh-compaction-vcc`） | `dsh-compaction-vcc` |
+| 别名装法（`add "@deepseek-ai/dsh-compaction-basic@npm:dsh-compaction-vcc"`） | `@deepseek-ai/dsh-compaction-basic` |
+
+**关键：这两个名字都可能真的在被使用，但它们不是一回事。**
+
+- **别名**（`@deepseek-ai/dsh-compaction-basic`）——宿主内置的每个预设
+  （`preset-standard` 等）都在自己的 `isolate` realm 里声明一行
+  `{ id: compaction-basic, name: "@deepseek-ai/dsh-compaction-basic" }`。
+  **预设只认这个名字。** 别名装法就是用我们这份顶替官方那份。
+- **真名**（`dsh-compaction-vcc`）——只是宿主层的 `- id: compaction-vcc` 条目在用它，
+  另外 `recall` / `search` 工具也从这里来。
+
+⇒ **别名不是可有可无的残留。删掉别名 = 所有预设都退回官方 LLM 摘要。**
+而 `recall` / `search` 工具照样能用，所以**看起来一切正常**。
+
+**升级只覆盖你当前用的那个名字**，于是出现一旧一新：
+
+```
+node_modules/dsh-compaction-vcc/                 ← 每次升级都更新
+node_modules/@deepseek-ai/dsh-compaction-basic/  ← 停在第一次装进去的版本
+```
+
+**2026-11-07 实证（一）：两份副本，版本不同。** 机器上
+`dsh-compaction-vcc/` 已是 0.7.0，`@deepseek-ai/dsh-compaction-basic/` 还停在同一晚
+19:59 装的 **0.4.0**。宿主加载的是 0.4.0，压缩产出与 0.4.0 离线编译逐字吻合
+（129 条目），而 0.7.0 应产出 185 条目。排查时静态检查全绿（版本号、入口、
+`role === "tool"` 分支都在），只有实际产出对不上。
+
+**2026-11-07 实证（二）：矫枉过正，把别名删了。**
+同一台机器上「按实证（一）的办法删掉别名」之后，下一次压缩的
+`compaction/summary` 事件里 `provider` 从 `dsh-compaction-vcc` 变成了
+**一个聊天模型**（`zlwb-pool-vision` / `deepseek-v4.1-flash`），正文从
+8 万字符的原文搬运缩成 5 千字符的 LLM 摘要——**8.3 万 token 的对话被概括成一段话**。
+这就是上面那条：别名没了，预设回落到官方摘要引擎。
+
+**⇒ 正确做法不是删别名，而是让两份都更新到同一版本。**
+
+#### 怎么查
+
+**第 1 步：看有多少份、各是什么版本。**
+
+```bash
+find ~/.dsh/profiles/<profile>/node_modules -maxdepth 3 \
+  -path "*compaction*" -name package.json 2>/dev/null \
+  | while read f; do
+      python3 -c "import json;d=json.load(open('$f'));print('$(dirname $f)', '→', d['name'], d['version'])"
+    done
+```
+
+两行、版本相同 = 健康。两行、版本不同 = 有一份旧（**不是删掉，是更新**）。
+只有一行 = 看你有没有挂预设（见下一节）。
+
+**第 2 步：看预设到底解析到谁。**
+
+```bash
+cd ~/.dsh/profiles/<profile> && node -e '
+const {createRequire}=require("module");
+const r=createRequire("file://" + process.cwd() + "/");
+try{
+  const m=r("@deepseek-ai/dsh-compaction-basic/package.json");
+  console.log("别名解析到:", m.name, m.version);
+  console.log(m.name==="dsh-compaction-vcc" ? "✅ 预设会用本引擎" : "❌ 预设会用官方摘要引擎");
+}catch(e){ console.log("❌ 别名解析不到 —— 所有预设都会退回官方摘要引擎"); }
+'
+```
+
+**第 3 步（最硬的判据）：看下一次压缩的 `provider`。**
+
+```bash
+zstd -dc ~/.dsh/sessions/<工作区>/session-<id>/session.v4.jsonl.zstd 2>/dev/null \
+  | python3 -c '
+import sys,json
+for line in sys.stdin:
+    try: o=json.loads(line)
+    except: continue
+    if o.get("type")=="compaction/summary":
+        d=o["data"]
+        kind="LLM摘要(NG)" if "llmStreamCall" in d else "VCC确定性编译(OK)"
+        print(o["seq"], d["provider"], "|", kind)
+'
+```
+
+`provider` 必须是 `dsh-compaction-vcc`。**出现任何聊天模型名 = 跑的是官方摘要引擎。**
+
+#### 怎么修
+
+两份都更新到同一版本。**别删别名。**
+
+```bash
+TGZ=~/dsh-compaction-vcc/dsh-compaction-vcc-X.Y.Z.tgz
+for D in dsh-compaction-vcc @deepseek-ai/dsh-compaction-basic; do
+  T=~/.dsh/profiles/web/node_modules/$D
+  mkdir -p "$T" && tar xzf "$TGZ" -C "$T" --strip-components=1
+done
+```
+
+`package.json` 里两条 `file:` 依赖都指向同一个 tgz 即可：
+
+```json
+"dsh-compaction-vcc": "file:.../dsh-compaction-vcc-X.Y.Z.tgz",
+"@deepseek-ai/dsh-compaction-basic": "file:.../dsh-compaction-vcc-X.Y.Z.tgz"
+```
+
+**别名那条不要写进 `dsh.profile.bundles`**——它只是个顶替用的名字，
+进去会让宿主把它当独立 bundle 再挂一次。
+
+**0.7.2 起本引擎会在启动时自检**，发现同一台机器上还有另一份同名包时打印
+`warn`；自检按**包清单里的 `name` 字段**判断，不按目录名——目录名和包名不一致
+正是别名装法的常态。（0.7.1 的自检按路径字符串判断，会把健康的别名装法误报成
+「没接管」，0.7.2 已修。）
+
+> **一句话记忆**：升级这个包之后如果「没变化」，先数 `node_modules` 里有几份、
+> 各是什么版本，**并且看下一次压缩的 `provider`**。版本号对但行为是旧的，
+> 多半是加载了另一份；`provider` 变成聊天模型，则是别名没了、预设退回了官方摘要。
+
 ### 方法 1 —— 顶替内置引擎（别名安装）
 
 ```bash
@@ -319,7 +442,9 @@ MIT 许可证。
 
 | 版本 | 状态 | 说明 |
 |---|---|---|
-| **0.7.0** | ✅ 当前 | **审计后清理。** 删掉 0.2.0 起就已失灵的 `src/client.js`（621 行 / 28.4 kB 死代码，`dsh.client` 声明既已删除，这个浏览器端就再无入口），包体 83.5 → 79.0 kB。README 里「浏览器设置卡片」那段与 0.2.0「前端已删」自相矛盾，已改为「设置命名空间（无界面）」。版本表补回 0.4.0–0.6.1 的缺档。另：`package.json` 的 `exports["./client"]` 与 `check` 脚本同步摘除。 |
+| **0.7.2** | ✅ 当前 | **纠 0.7.1 的错误结论 + 修自检误报。** ① 0.7.1 的 README 说「两份副本并存就删掉别名」，**这个结论是错的**：别名不是残留，宿主每个预设都声明 `{ id: compaction-basic, name: "@deepseek-ai/dsh-compaction-basic" }`，**预设只认这个名字**。删掉别名后，实测 `compaction/summary` 的 `provider` 从 `dsh-compaction-vcc` 变成一个聊天模型（`llmStreamCall` 字段出现），8.3 万 token 的对话被摘要成 5 千字符。正确做法是**两份都更新到同一版本，别删别名**。README 整节重写。 ② `preset-check` 的 `isEnginePath()` 按**路径字符串**找 `dsh-compaction-vcc`，而别名装法把包放在 `@deepseek-ai/dsh-compaction-basic/` 下，目录名里根本没这串 ⇒ **所有健康的别名装法都被误报成「没接管」**。改为读包清单的 `name` 字段判断。 ③ 原测试 `assert.equal(isVccRow(row, baseUrl), false, "basic does not resolve to vcc")` **把 bug 写成了预期结果**——测试环境没有别名目录，旧的路径判据压根没被执行。改为真造一个别名布局再断言，另补一条「官方真的会走到摘要引擎」的反向用例。测试 162→163。 |
+| 0.7.1 | ⚠️ 已被 0.7.2 取代 | **修「两份副本并存导致升级静默不生效」。** 同一台机器上先用过别名装法、后来改用 bundle 装法时，`node_modules/` 下会留下两份同名包（`dsh-compaction-vcc` 与 `@deepseek-ai/dsh-compaction-basic`），**升级只覆盖其中一份**，宿主可能加载旧的，表现为「版本号是新的、行为是旧的」，无任何报错。实证：0.7.0 与 0.4.0 并存，加载的是 0.4.0。新增 `src/shadow-check.js` 启动自检，发现另一份同名包且版本不同就 `warn`（同版本重复不报）。README 增「第二种静默失效」一节。⚠️ **两处错**：清理步骤写「删掉别名」，而别名是预设唯一认得的名字，删了会让压缩整体退回 LLM 摘要；`preset-check` 自检按路径字符串判断，把健康的别名装法误报成「没接管」。**请用 0.7.2。** 测试 157→162。 |
+| 0.7.0 | ✅ 可用 | **审计后清理。** 删掉 0.2.0 起就已失灵的 `src/client.js`（621 行 / 28.4 kB 死代码，`dsh.client` 声明既已删除，这个浏览器端就再无入口），包体 83.5 → 79.0 kB。README 里「浏览器设置卡片」那段与 0.2.0「前端已删」自相矛盾，已改为「设置命名空间（无界面）」。版本表补回 0.4.0–0.6.1 的缺档。另：`package.json` 的 `exports["./client"]` 与 `check` 脚本同步摘除。 |
 | 0.6.1 | ✅ 可用 | **两处修复，都会让宿主静默失效或冻结。** ① `isCheckpointSource` 认错了宿主的 source 形状：宿主 0.2.x 发的是 `{kind:"compact-checkpoint"}`，代码判的是宿主旧版的 `{kind:"plugin", plugin:"compact"}`，条件**永远不成立** ⇒ 检查点处理分支从未进入，连带 `recall(type:"checkpoint")` 一直取不到检查点（修复前认得 0 个，修复后 5 个）。② `parseSeqSpec` 缺 `Number.isSafeInteger` 上界校验：`recall(type:"seq", id:"9007199254740992")` 会在 `expandSelections` 的 `seq += 1` 循环里**同步死循环**（2^53 上 `+1` 不改变数值），工具永不返回、定时器不触发、宿主必须重启。parser 与 expander 两层都已加防护，顺带拒绝 `seq 0`。另修三处「单个畸形节点炸掉整次编译」：`content` 为 null、数组含 null 块、`content` 非数组，原本都抛 `TypeError` 而整次压缩作废（宿主把错误吞成 warning，症状是「压缩就是不发生」）。测试 137→149。 |
 | 0.6.0 | ✅ 可用 | 检查点内注入正文清理（`elideCheckpointInjectedBodies`，默认关）。旧检查点里带着它编译时那份记忆快照与规则块，而每次压缩都会重新注入一遍 —— 那份副本就是纯重复。开启后把它换成一行指针，原文仍在 append-only 日志里可 `recall`。实测 90,877 → 46,290 字符（−44,737）。另加 `elideSourceKinds`（按 source.kind 丢弃注入型行）。 |
 | 0.5.0 | ✅ 可用 | 补齐 0.2.2 兼容面：tool-result 的 `toolCallId` 从 `content[0]` 移到 message 层后，`-> result N` 指针的映射预扫描一直没命中（**静默**丢失全部 result 指针，`recall(type:"result")` 因此失效）。同时整理 `session-compat`，两种 session 形状统一走一对访问器。 |
