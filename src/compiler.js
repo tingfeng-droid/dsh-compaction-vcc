@@ -473,6 +473,14 @@ const MEMORY_FILE_CLOSE = "</runtime-memory-file>";
  * (`USER.md` then `MEMORY.md`), so the two are treated as a single span.
  */
 const MEMORY_BLOCK_JOINER = /^\s*(?:MEMORY\.md \(working reference\)|USER\.md \(user profile\)|<runtime-memory-file )/;
+/**
+ * One role header line of this compiler's own checkpoint format. Memory snapshots
+ * never contain one, so finding it between a file block's opening and its close
+ * means the close belongs to a LATER block and the span must stop before this.
+ * Guards the truncation case: a block cut mid-way loses its closing tag, and
+ * without this the span would swallow the conversation that follows.
+ */
+const MEMORY_ROLE_HEAD = /\n\[(?:user|assistant|tool)\]\s*\n/;
 
 /**
  * Marker text the host puts inside a REAL rules/index wrapper. Prose that only
@@ -520,6 +528,17 @@ function findMemorySnapshotSpans(text) {
     for (;;) {
       const close = text.indexOf(MEMORY_FILE_CLOSE, cursor);
       if (close === -1) break;
+      // A memory block whose closing tag was truncated away has no close of its
+      // own, so the search below would run on to the NEXT block's close and
+      // swallow every real turn in between. Role headers are this compiler's own
+      // output and never appear inside a memory snapshot, so a role header before
+      // the close proves the span has left the block: stop there and keep the
+      // dialogue. Erring toward eliding less is safe; eliding a turn is not.
+      const roleHead = MEMORY_ROLE_HEAD.exec(text.slice(cursor, close));
+      if (roleHead !== null) {
+        end = cursor + roleHead.index;
+        break;
+      }
       const after = close + MEMORY_FILE_CLOSE.length;
       end = after;
       cursor = after;

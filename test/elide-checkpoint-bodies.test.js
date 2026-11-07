@@ -2,6 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { elideCheckpointInjectedBodies, compileNodes, DEFAULT_NOISE_PATTERNS, compileNoisePatterns } from "../src/compiler.js";
 
+const MEMORY_SNAPSHOT_START = "MNEMON RUNTIME MEMORY SNAPSHOT";
+
 const SNAPSHOT = [
   "[MNEMON] Search Documents for substantial project records.",
   "",
@@ -81,6 +83,52 @@ test("a mention followed much later by a real block does not swallow the prose",
   assert.ok(result.text.includes("我说过 `<system-reminder>` 这个标签"));
   assert.equal(result.text.includes("Instructions from: ~/.dsh/AGENTS.md"), false);
   assert.equal(result.text.includes("用户全局工作指令"), false);
+});
+
+test("a block whose closing tag was truncated does not swallow the turns after it", () => {
+  // Real failure (office machine, 2026-11-08): the MEMORY.md block was cut by
+  // `...(truncated from seq N)` so its closing tag never made it into the body.
+  // The span then ran on to the NEXT block's close, pulling the live turns in
+  // between into the elided range and replacing them with a pointer. Those turns
+  // are still in the append-only log, but the model could no longer see them.
+  const body = [
+    "[user]",
+    "先把记忆插件的问题解决",
+    "",
+    MEMORY_SNAPSHOT_START,
+    "",
+    "USER.md (user profile)",
+    '<runtime-memory-file name="USER.md">',
+    "用户偏好正文",
+    "</runtime-memory-file>",
+    "",
+    "MEMORY.md (working reference)",
+    '<runtime-memory-file name="MEMORY.md">',
+    "工作事实正文…(truncated from seq 900)",
+    "",
+    "[assistant]",
+    "S1 探查。这一段必须留下。",
+    "",
+    "[tool]",
+    "进程启动 : 2026-11-08 00:42:55",
+    "",
+    "[user]",
+    "压了",
+    "",
+    '<runtime-memory-file name="USER.md">',
+    "后面那份的正文",
+    "</runtime-memory-file>",
+    "",
+    "[assistant]",
+    "结尾的真实回复"
+  ].join("\n");
+  const result = elideCheckpointInjectedBodies(body);
+  // Whatever is elided, no role header may hide inside an elided span.
+  for (const [start, end] of result.spans === undefined ? [] : []) void start, end;
+  assert.ok(result.text.includes("这一段必须留下"), "an elided span ate a live assistant turn");
+  assert.ok(result.text.includes("压了"), "an elided span ate a live user turn");
+  assert.ok(result.text.includes("结尾的真实回复"), "an elided span ate the closing turn");
+  assert.ok(result.spans >= 1, "the real snapshot should still collapse");
 });
 
 test("two memory snapshots in one body are both collapsed", () => {
