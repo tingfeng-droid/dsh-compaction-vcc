@@ -17,12 +17,12 @@ test("resolveConfig applies the documented defaults", () => {
   const config = resolveConfig({});
   assert.equal(config.thresholdRatio, 0.5);
   assert.equal(config.retainTurns, 1);
-  assert.equal(config.retainTokens, 5120);
+  assert.equal(config.retainTokens, 20480);
   assert.equal(config.maxTokens, 8192);
   assert.equal(config.checkpointScale, 0.1);
-  assert.equal(config.checkpointCap, 65536);
-  assert.equal(config.textTokens, 512);
-  assert.equal(config.userTextTokens, 1024);
+  assert.equal(config.checkpointCap, 393216);
+  assert.equal(config.textTokens, 8192);
+  assert.equal(config.userTextTokens, 16384);
   assert.equal(config.toolCallTokens, 128);
   assert.equal(config.toolResultExcerptTokens, 256);
   assert.equal(config.includeReasoning, false);
@@ -151,7 +151,7 @@ test("resolveCompactSpec scales budgets and rejects invalid windows", () => {
   const spec = resolveCompactSpec(policy, 1000);
   assert.equal(spec.thresholdTokens, 500);
   assert.equal(spec.retainTurns, 1);
-  assert.equal(spec.retainTokens, 5120);
+  assert.equal(spec.retainTokens, 20480);
   assert.throws(() => resolveCompactSpec(policy, 0), TargetPressureConfigError);
   const configured = resolveTargetPolicy(resolveConfig({ retainTurns: 2, retainTokens: 4000 }), { provider: "p", model: "m" });
   const scaled = resolveCompactSpec(configured, 1000);

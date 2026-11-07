@@ -47,6 +47,21 @@ export function parseSeqSpec(input) {
     }
     const start = Number(match[1]);
     const end = match[2] === undefined ? start : Number(match[2]);
+    // ⚠️ 2026-11-07 — reject anything outside the safe-integer range BEFORE any
+    // arithmetic. A seq at or above 2^53 makes `seq += 1` a no-op in IEEE-754
+    // (start + 1 === start), so `expandSelections`'s `for (seq = start; seq <=
+    // end; seq += 1)` never terminates and freezes the host synchronously —
+    // the tool call never returns and no timer can fire. Both bounds are
+    // checked because an out-of-range `end` only needs the loop guard to be
+    // true; the pathological case is start === end === 2^53.
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end)) {
+      errors.push(`seq selection "${part}" is outside the safe integer range`);
+      continue;
+    }
+    if (start < 1) {
+      errors.push(`invalid seq selection "${part}" (seq starts at 1)`);
+      continue;
+    }
     if (end < start) {
       errors.push(`invalid seq range "${part}" (end before start)`);
       continue;
@@ -106,6 +121,12 @@ export function expandSelections(selections) {
   const seqs = [];
   const seen = new Set();
   for (const { start, end } of selections) {
+    // ⚠️ 2026-11-07 — defensive guard. `parseSeqSpec` already rejects unsafe
+    // integers, but this function is exported and reachable with a hand-built
+    // selection array. Without the guard, `seq += 1` at 2^53 is a no-op and the
+    // loop below never terminates (synchronous host freeze, unrecoverable
+    // without a restart). Skipping the range is the only safe failure mode.
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end)) continue;
     for (let seq = start; seq <= end; seq += 1) {
       if (seen.has(seq)) continue;
       seen.add(seq);

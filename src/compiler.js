@@ -95,7 +95,34 @@ export function isCjkChar(char) {
     (code >= 0x4e00 && code <= 0x9fff) || // CJK Unified Ideographs
     (code >= 0xf900 && code <= 0xfaff) || // CJK Compatibility Ideographs
     (code >= 0x3000 && code <= 0x303f) || // CJK Symbols and Punctuation
-    (code >= 0xff00 && code <= 0xffef) // Fullwidth Forms
+    (code >= 0xff00 && code <= 0xffef) || // Fullwidth Forms
+    // ⚠️ 2026-11-07 — the ranges below are NOT CJK ideographs, but they carry the
+    // same 0.6-token character density as Chinese, so they belong in this
+    // density class. Without them every kana, hangul syllable, Thai and
+    // Devanagari character took the 0.3 English branch, and the DeepSeek
+    // estimate undercounted those scripts by roughly 2x. `estimateEntryTokens`
+    // takes max(countTokens, estimate), so budgets never actually overflowed —
+    // but the estimate was systematically wrong for any non-Chinese CJK/Indic
+    // session. The function name is kept for API stability; it means "CJK-density
+    // character", not "ideograph".
+    (code >= 0x3040 && code <= 0x30ff) || // Hiragana + Katakana
+    (code >= 0x31f0 && code <= 0x31ff) || // Katakana Phonetic Extensions
+    (code >= 0xac00 && code <= 0xd7af) || // Hangul Syllables
+    (code >= 0x1100 && code <= 0x11ff) || // Hangul Jamo
+    (code >= 0x0e00 && code <= 0x0e7f) || // Thai
+    (code >= 0x0e80 && code <= 0x0eff) || // Lao
+    (code >= 0x0900 && code <= 0x097f) || // Devanagari
+    (code >= 0x0980 && code <= 0x09ff) || // Bengali
+    (code >= 0x0a00 && code <= 0x0a7f) || // Gurmukhi
+    (code >= 0x0a80 && code <= 0x0aff) || // Gujarati
+    (code >= 0x0b00 && code <= 0x0b7f) || // Oriya
+    (code >= 0x0b80 && code <= 0x0bff) || // Tamil
+    (code >= 0x0c00 && code <= 0x0c7f) || // Telugu
+    (code >= 0x0c80 && code <= 0x0cff) || // Kannada
+    (code >= 0x0d00 && code <= 0x0d7f) || // Malayalam
+    (code >= 0x0d80 && code <= 0x0dff) || // Sinhala
+    (code >= 0x1000 && code <= 0x109f) || // Myanmar
+    (code >= 0x1780 && code <= 0x17ff)    // Khmer
   );
 }
 
@@ -376,7 +403,12 @@ export function parseToolArguments(arguments_) {
  */
 export function projectToolResultText(blocks) {
   const parts = [];
+  // ⚠️ 2026-11-07 — tolerate a missing/non-array projection input and null
+  // blocks inside it. Both used to throw (`block.type` on null), and this helper
+  // sits on the tool-result, memory-recall and search paths alike.
+  if (!Array.isArray(blocks)) return "";
   for (const block of blocks) {
+    if (block === null || block === undefined) continue;
     if (block.type === "text") {
       const text = sanitize(block.text ?? "");
       if (text.length > 0) parts.push(text);
@@ -389,7 +421,189 @@ export function projectToolResultText(blocks) {
 
 /** Whether a message source identifies a landed compaction checkpoint node. */
 export function isCheckpointSource(source) {
-  return source !== undefined && source.kind === "plugin" && source.plugin === "compact";
+  if (source === undefined || source === null) return false;
+  // Host 0.2.x builds the marker with `compactCheckpointSource()`, which yields
+  // `{ kind: "compact-checkpoint", compactionId, sourceCommandId? }`. The legacy
+  // `{ kind: "plugin", plugin: "compact" }` shape from earlier hosts is still
+  // accepted so checkpoints written by an older host stay recallable.
+  if (source.kind === "compact-checkpoint") return true;
+  return source.kind === "plugin" && source.plugin === "compact";
+}
+
+/**
+ * Whether a message source is one of the harness-injected instruction blocks
+ * the caller asked to elide (see `elideSourceKinds`). Matching is on the
+ * structured `source.kind` field the harness records, never on message text:
+ * a user quoting "Instructions from:" must not be mistaken for the real thing.
+ *
+ * The default (`undefined`/empty) matches nothing, so the open-source default
+ * behavior is byte-identical to before this option existed.
+ * @param source - message source descriptor, possibly absent.
+ * @param kinds - configured exact `source.kind` values to elide.
+ * @returns true when this node should collapse to a recall pointer.
+ */
+export function isElidableSource(source, kinds) {
+  if (kinds === undefined || kinds.length === 0) return false;
+  const kind = source?.kind;
+  return typeof kind === "string" && kinds.includes(kind);
+}
+
+/**
+ * Display labels for elidable instruction sources. Anything not listed falls
+ * back to its raw `source.kind`, so a new host source still gets a readable
+ * pointer without a code change.
+ */
+const ELIDABLE_SOURCE_LABELS = Object.freeze({
+  "dsh-mnemon": "记忆快照",
+  "agent-instructions": "规则与冷库索引",
+  "skill-catalog": "技能清单",
+  "runtime-context": "运行时上下文",
+  "time-context": "时间上下文"
+});
+
+/**
+ * Markers that open a hot-memory snapshot as our memory plugin renders it.
+ * `[MNEMON]` is the routing hint, `MNEMON RUNTIME MEMORY SNAPSHOT` the payload.
+ */
+const MEMORY_SNAPSHOT_MARKERS = Object.freeze(["MNEMON RUNTIME MEMORY SNAPSHOT", "[MNEMON]"]);
+/** Closing tag of one memory file block inside a snapshot. */
+const MEMORY_FILE_CLOSE = "</runtime-memory-file>";
+/**
+ * Text that may separate two consecutive memory file blocks of ONE snapshot
+ * (`USER.md` then `MEMORY.md`), so the two are treated as a single span.
+ */
+const MEMORY_BLOCK_JOINER = /^\s*(?:MEMORY\.md \(working reference\)|USER\.md \(user profile\)|<runtime-memory-file )/;
+
+/**
+ * Marker text the host puts inside a REAL rules/index wrapper. Prose that only
+ * mentions `<system-reminder>` as a string must not qualify, so a candidate
+ * span has to prove itself by carrying one of these phrases early on.
+ */
+const SYSTEM_REMINDER_BODY_MARKERS = Object.freeze([
+  "The following workspace instructions may be relevant",
+  "Instructions from:"
+]);
+/** How far into a candidate wrapper the proof phrase must appear. */
+const SYSTEM_REMINDER_PROOF_WINDOW = 600;
+/** How close a memory marker must sit to the first file block to count. */
+const MEMORY_MARKER_WINDOW = 800;
+
+/**
+ * Locate injected memory snapshots embedded in a PRIOR checkpoint body.
+ *
+ * A snapshot is a run of consecutive `<runtime-memory-file …>…</…>` blocks.
+ * The span starts at the nearest preceding snapshot marker so the routing hint
+ * and the "Entry annotations default…" preamble go with it. The marker must sit
+ * close to the first file block, so prose that merely quotes the marker text
+ * (e.g. a discussion about this very feature) is not mistaken for a snapshot.
+ * @param text - prior checkpoint body.
+ * @returns `[start, end)` character spans, left to right.
+ */
+function findMemorySnapshotSpans(text) {
+  const spans = [];
+  let searchFrom = 0;
+  while (searchFrom < text.length) {
+    const markerAt = MEMORY_SNAPSHOT_MARKERS
+      .map((marker) => text.indexOf(marker, searchFrom))
+      .filter((index) => index !== -1)
+      .reduce((lowest, index) => (lowest === undefined || index < lowest ? index : lowest), undefined);
+    if (markerAt === undefined) break;
+    const firstFile = text.indexOf("<runtime-memory-file ", markerAt);
+    if (firstFile === -1) break;
+    if (firstFile - markerAt > MEMORY_MARKER_WINDOW) {
+      // Just prose quoting the marker — skip past it and keep looking.
+      searchFrom = markerAt + 1;
+      continue;
+    }
+    let end;
+    let cursor = firstFile;
+    for (;;) {
+      const close = text.indexOf(MEMORY_FILE_CLOSE, cursor);
+      if (close === -1) break;
+      const after = close + MEMORY_FILE_CLOSE.length;
+      end = after;
+      cursor = after;
+      if (!MEMORY_BLOCK_JOINER.test(text.slice(after, after + 240))) break;
+    }
+    if (end === undefined) break;
+    spans.push([markerAt, end]);
+    searchFrom = end;
+  }
+  return spans;
+}
+
+/**
+ * Locate `<system-reminder>…</system-reminder>` wrappers that really frame
+ * workspace rules, the cold-store index or runtime context.
+ *
+ * The wrapper must open at a line start, be followed by the block body marker
+ * within a short window, and close before the body repeats — the host emits one
+ * wrapper per injection, never nested. A sentence that merely mentions the tag
+ * name fails all three checks, which is what keeps live prose intact.
+ * @param text - prior checkpoint body.
+ * @returns `[start, end)` character spans, left to right.
+ */
+function findSystemReminderSpans(text) {
+  const spans = [];
+  const pattern = /(?:^|\n)<system-reminder>\n/g;
+  let match;
+  while ((match = pattern.exec(text)) !== null) {
+    const open = text.indexOf("<system-reminder>", match.index);
+    const head = text.slice(open, open + SYSTEM_REMINDER_PROOF_WINDOW);
+    if (!SYSTEM_REMINDER_BODY_MARKERS.some((marker) => head.includes(marker))) continue;
+    const close = text.indexOf("</system-reminder>", open);
+    if (close === -1) continue;
+    spans.push([open, close + "</system-reminder>".length]);
+  }
+  return spans;
+}
+
+/**
+ * Collapse harness-injected bodies embedded in a PRIOR checkpoint to one-line
+ * pointers.
+ *
+ * Why this exists: those bodies are re-sent in full after every compaction, so
+ * any copy kept inside a checkpoint body is a duplicate — the checkpoint grows
+ * by one snapshot per compaction even though nothing new was said. The originals
+ * stay in the append-only session log, so `recall` still restores them verbatim.
+ *
+ * Only checkpoint prose is touched; live conversation text is never scanned.
+ * @param text - prior checkpoint body.
+ * @returns the rewritten body plus how many spans and characters were removed.
+ */
+export function elideCheckpointInjectedBodies(text) {
+  const spans = [...findMemorySnapshotSpans(text), ...findSystemReminderSpans(text)]
+    .sort((left, right) => left[0] - right[0]);
+  if (spans.length === 0) return { text, spans: 0, chars: 0 };
+  let out = "";
+  let cursor = 0;
+  let chars = 0;
+  let removed = 0;
+  for (const [start, end] of spans) {
+    // Overlapping spans would otherwise duplicate text; keep the outer one.
+    if (start < cursor) continue;
+    out += text.slice(cursor, start);
+    const length = end - start;
+    chars += length;
+    removed += 1;
+    out += `[注入内容已压缩为指针（原文 ${length} 字符）— 压缩后会重新注入，原文可用 recall 调回]`;
+    cursor = end;
+  }
+  out += text.slice(cursor);
+  return { text: out, spans: removed, chars };
+}
+
+/**
+ * One-line pointer standing in for an elided instruction block. Carries the
+ * seq so the agent can `recall` the original, plus what it was and how big it
+ * was — a bare `(seq N)` would read as content loss rather than a substitution.
+ * @param label - human name of the block ("记忆快照" / "规则与索引").
+ * @param seq - source sequence of the elided message.
+ * @param length - original character count.
+ * @returns the marker line.
+ */
+function elidedSourceMarker(label, seq, length) {
+  return `[${label} 已压缩为指针（${seqRef(seq)}，原文 ${length} 字符）— 原文可用 recall 调回，且下一次压缩后会重新注入]`;
 }
 
 /**
@@ -493,6 +707,10 @@ export function compileNodes(nodes, config, budgets) {
     documents: 0,
     reasoningElided: 0,
     noiseElided: 0,
+    elidedSourceRows: 0,
+    elidedSourceChars: 0,
+    elidedCheckpointSpans: 0,
+    elidedCheckpointChars: 0,
     checkpoints: 0,
     tokens: 0,
     elidedToolRows: 0,
@@ -519,7 +737,9 @@ export function compileNodes(nodes, config, budgets) {
     const message = node.message;
     if (message === null || message === undefined) continue;
     const first = message.content?.[0];
-    const toolResultBlock = first !== undefined && first.type === "tool-result" ? first : undefined;
+    // ⚠️ 2026-11-07 — `first !== undefined` misses null, which threw on
+    // `first.type`. Guard the null block explicitly.
+    const toolResultBlock = first !== undefined && first !== null && first.type === "tool-result" ? first : undefined;
     const callId = typeof message.toolCallId === "string"
       ? message.toolCallId
       : typeof toolResultBlock?.toolCallId === "string"
@@ -555,10 +775,20 @@ export function compileNodes(nodes, config, budgets) {
 
   for (const node of nodes) {
     const message = node.message;
-    if (message === null || message === undefined || message.content === undefined) continue;
+    // ⚠️ 2026-11-07 — `content` must be an iterable array here. A null/absent
+    // `content` used to fall through to `message.content[0]` below and throw
+    // `Cannot read properties of null (reading '0')`, which aborted the WHOLE
+    // compile: one malformed node cost the entire compaction, silently (the
+    // host's pre-step handler swallows the error as a warning). Skip the node
+    // instead so the rest of the region still compiles.
+    if (message === null || message === undefined) continue;
+    if (!Array.isArray(message.content)) continue;
     if (message.role === "assistant") {
       let header = "";
       for (const block of message.content) {
+        // ⚠️ 2026-11-07 — a null/undefined block in the array used to throw on
+        // `block.type` and abort the whole compile. Skip it.
+        if (block === null || block === undefined) continue;
         if (block.type === "text") {
           const text = sanitize(block.text ?? "");
           if (text.trim().length === 0) continue;
@@ -630,9 +860,31 @@ export function compileNodes(nodes, config, budgets) {
       /* reasoning-only and empty assistant messages produce no entry */
       continue;
     }
+    // ⚠️ 2026-11-07 — host 0.2.x derives a tool result as `role: "tool"` with
+    // `toolCallId` on the MESSAGE and a plain text block as `content[0]`. The
+    // loop used to handle only `assistant` and `user`, so every real tool result
+    // fell through and produced no entry: `stats.toolResults` stayed at 0, the
+    // `toolResultExcerptTokens` budget was inert, and the tool output never
+    // appeared in the checkpoint at all. Only the `-> result N` pointer survived
+    // (that map is built by the separate pre-pass above), so `recall` could still
+    // fetch the original — but the compiled view was misdescribed as "lossless"
+    // while silently dropping this whole class of content.
+    if (message.role === "tool") {
+      stats.toolResults += 1;
+      const body = projectToolResultText(message.content);
+      if (body.length > 0) {
+        const header = roleHeader("tool", node.seq);
+        // Excerpt to the configured budget: tool output is the bulk of a long
+        // session, and the full text stays one `recall(type:"result")` away via
+        // the call line's `-> result N` pointer.
+        const kept = excerptToolResult(body, effective.toolResultExcerptTokens, seqRef(node.seq));
+        pushEntry(node.seq, header + kept, "result");
+      }
+      continue;
+    }
     if (message.role === "user") {
       const first = message.content[0];
-      if (first !== undefined && first.type === "tool-result") {
+      if (first !== undefined && first !== null && first.type === "tool-result") {
         // Tool results never occupy an entry: the content is either absorbed
         // into the following assistant text or one recall away via the call
         // line's `-> result N` pointer (VCC drops results from brief mode too).
@@ -641,7 +893,19 @@ export function compileNodes(nodes, config, budgets) {
       }
       if (isCheckpointSource(message.source)) {
         stats.checkpoints += 1;
-        const text = projectToolResultText(message.content);
+        let text = projectToolResultText(message.content);
+        if (text.length > 0 && config.elideCheckpointInjectedBodies === true) {
+          // A prior checkpoint body still carries every memory snapshot and
+          // rules block that was live when it was compiled. Those are re-sent
+          // in full after this compaction, so keeping them here is a duplicate.
+          // Opt-in (default off) because it rewrites previously compiled prose.
+          const collapsed = elideCheckpointInjectedBodies(text);
+          if (collapsed.spans > 0) {
+            text = collapsed.text;
+            stats.elidedCheckpointSpans += collapsed.spans;
+            stats.elidedCheckpointChars += collapsed.chars;
+          }
+        }
         if (text.length > 0) {
           // The checkpoint node is a user/message in the durable protocol
           // (surface replacement only allows message nodes), but it is
@@ -651,9 +915,27 @@ export function compileNodes(nodes, config, budgets) {
         }
         continue;
       }
+      if (isElidableSource(message.source, config.elideSourceKinds)) {
+        // Harness-injected instruction blocks (hot memory, workspace rules,
+        // skill catalog…) are re-injected in full after every compaction, so
+        // keeping their body here duplicates them: one copy in the checkpoint,
+        // one copy re-injected, every time. Collapse to a recall pointer.
+        // `elideSourceKinds` is empty by default, so stock behavior is
+        // unchanged; we enable it because our memory plugin re-injects.
+        const text = projectToolResultText(message.content);
+        if (text.length === 0) continue;
+        const label = ELIDABLE_SOURCE_LABELS[message.source.kind] ?? message.source.kind;
+        stats.elidedSourceRows += 1;
+        stats.elidedSourceChars += text.length;
+        pushEntry(node.seq, `${roleHeader("user", node.seq)}* ${elidedSourceMarker(label, node.seq, text.length)}`, "note");
+        continue;
+      }
       let surviving = 0;
       let header = "";
       for (const block of message.content) {
+        // ⚠️ 2026-11-07 — a null/undefined block in the array used to throw on
+        // `block.type` and abort the whole compile. Skip it.
+        if (block === null || block === undefined) continue;
         if (block.type === "text") {
           let text = sanitize(block.text ?? "");
           if (config.stripNoiseXml !== false) text = stripNoiseXml(text, patterns);
@@ -857,7 +1139,13 @@ export function frameCheckpoint(entries, headerLine, introLine, footerLine) {
   if (introLine !== undefined) body.push(introLine);
   if (headerLine !== undefined) body.push(headerLine);
   body.push(...entries);
-  if (footerLine !== undefined) body.push(footerLine);
+  // `footerLine` accepts one line or an ordered list, so callers can append
+  // several trailing notes (cap notice + verbatim retention) without
+  // concatenating them into one unreadable paragraph.
+  if (footerLine !== undefined) {
+    if (Array.isArray(footerLine)) body.push(...footerLine.filter((line) => line !== undefined));
+    else body.push(footerLine);
+  }
   return [
     { type: "text", text: `${CHECKPOINT_PREAMBLE}\n\n${CHECKPOINT_OPEN_TAG}` },
     { type: "text", text: joinCompiledEntries(body) },

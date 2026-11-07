@@ -17,11 +17,11 @@ import { InstantCompactionEngine } from "../src/index.js";
 test("SETTINGS_SCHEMA defaults mirror engine defaults", () => {
   const schema = InstantCompactionEngine.SETTINGS_SCHEMA;
   const resolved = schema({});
-  assert.equal(resolved.checkpointCap, 65536);
+  assert.equal(resolved.checkpointCap, 393216);
   assert.equal(resolved.auto, true);
   assert.equal(resolved.thresholdRatio, 0.5);
   assert.equal(resolved.retainTurns, 1);
-  assert.equal(resolved.retainTokens, 5120);
+  assert.equal(resolved.retainTokens, 20480);
 });
 
 test("SETTINGS_SCHEMA validates user overrides and rejects malformed values", () => {

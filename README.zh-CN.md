@@ -69,12 +69,12 @@ Recall 能取回**一切**：文本、推理过程、工具调用的完整参数
 |---|---|---|
 | `thresholdRatio` | `0.5` | 上下文用到多大比例时自动触发压缩（0.5 = 用到一半） |
 | `retainTurns` | `1` | 优先保留的完整回合数（自动压缩和手动 `/compact` 都按此规则；不突破上限） |
-| `retainTokens` | `5120` | 保留区 token **硬上限**：向前补足完整回合时总量永不超出；若最近回合本身就超过它，只保留该回合内能装下的部分 |
+| `retainTokens` | `20480` | 保留区 token **硬上限**：向前补足完整回合时总量永不超出；若最近回合本身就超过它，只保留该回合内能装下的部分 |
 | `auto` | `true` | 开启自动压缩：监听 `agent/pre-step` 压力事件和 `agent/request-error` 溢出恢复 |
-| `checkpointCap` | `65536` | 单个检查点的编译预算（估算 token）：更小的会话近乎无损地保留，更大的内容则省略到该上限 |
+| `checkpointCap` | `393216` | 单个检查点的编译预算（估算 token）：更小的会话近乎无损地保留，更大的内容则省略到该上限 |
 | `maxTokens` / `checkpointScale` | `8192` / `0.1` | **已弃用**——仅为兼容旧配置而接受，**不再起作用**：预算就是 cap 本身（无保底、无比例缩放） |
-| `textTokens` | `512` | 每条助手文本的预算 |
-| `userTextTokens` | `1024` | 每条用户文本的预算 |
+| `textTokens` | `8192` | 每条助手文本的预算 |
+| `userTextTokens` | `16384` | 每条用户文本的预算 |
 | `toolCallTokens` | `128` | 每个工具调用单行的预算（这个永远不缩放——见下面的省略规则） |
 | `toolResultExcerptTokens` | `256` | 仅为兼容官方配置而接受；**不起作用**——工具结果本来就不占位置 |
 | `includeReasoning` | `false` | 是否在检查点里保留推理过程 |
@@ -93,19 +93,21 @@ recall 工具和命令插件各自接受 `{ maxRecallTokens?: 16000, maxSearchHi
 
 预算有两道保险：按 token 数限制，再按"预算 × 4"的字符数限制——所以再长的连续字符串（base64 大块、压缩过的文件）也绕不过去。工具调用**永远是单行**：不会缩放，预算不够时只压缩对话文本（每条最少留 **32 token**）。如果压缩结果还是超过预算，先删最旧的**工具行**（`[N tool/result entries elided: seqs a-b]`），再删其余最旧的条目（`[N earlier entries elided: seqs a-b]`）——工具调用永远挤不掉对话。最新的内容总能保住。
 
-### 浏览器设置卡片（设置 → 插件）
+### 设置命名空间（无界面）
 
 引擎在**任何装配了 settings 域**的部署（标准 web/desktop profile 都有）上暴露一个用户设置命名空间（`compaction-vcc`）。可编辑子集持久化到 `settings.yaml`，**叠加在**插件行的 cordis 配置之上：
 
 | 字段 | 含义 |
 |---|---|
-| `checkpointCap` | 单个检查点的编译预算（默认 65536） |
+| `checkpointCap` | 单个检查点的编译预算（默认 393216） |
 | `auto` | 注册步骤间自动压缩 |
 | `thresholdRatio` | 触发自动压缩的上下文窗口占比（默认 `0.5`） |
 | `retainTurns` | 优先保留的完整回合数（默认 `1`；不突破上限） |
-| `retainTokens` | 保留区 token **硬上限**，补足回合或截取最近回合时永不超出（默认 `5120`） |
+| `retainTokens` | 保留区 token **硬上限**，补足回合或截取最近回合时永不超出（默认 `20480`） |
 
-其余字段（`modelPolicies`、`toolArgTools`、`debug`、`debugLogPath`、已弃用的 `maxTokens`/`checkpointScale` 等）仍只由 cordis 配置管理。设置层永远弄不坏引擎：每次设置写入都会先经过完整配置解析器的重新校验才会持久化；未暴露的配置字段保持组合层的值。没有 settings 服务时引擎行为与之前完全一致（只看组合配置）。卡片注册在客户端 bundle 上，所以只要装上这个包就会出现，无需改任何部署配置——**重启一次 `dsh web`** 让启动图拾取 `dsh.client` bundle 即可。
+其余字段（`modelPolicies`、`toolArgTools`、`debug`、`debugLogPath`、已弃用的 `maxTokens`/`checkpointScale` 等）仍只由 cordis 配置管理。设置层永远弄不坏引擎：每次设置写入都会先经过完整配置解析器的重新校验才会持久化；未暴露的配置字段保持组合层的值。没有 settings 服务时引擎行为与之前完全一致（只看组合配置）。
+
+> **⚠️ 没有图形设置卡片。** 0.2.0 起 `dsh.client` 声明已被整个删掉（原因见下方版本表）。上面的命名空间仍然存在、仍可通过 settings API 读写，但**不会被渲染成界面控件**——改这些值请直接编辑 `cordis.patch.yml` 的 `compaction-vcc.config`。
 
 ### 分词与多语言
 
@@ -317,7 +319,12 @@ MIT 许可证。
 
 | 版本 | 状态 | 说明 |
 |---|---|---|
-| **0.3.0** | ✅ 当前 | **修「预设场景静默失效」**：宿主挂了 agent preset 时，preset 在自己的 isolate realm 里另有引擎实例，本包插在宿主层的那行进不去，压缩**静默回落到官方 basic**（工具却照常可用）。本版启动后自检 preset 接管情况并打 `warn`，开关 `warnOnPresetTakeover`。补 19 条 preset 场景测试。**引擎行为未变，只是不再静默。** |
+| **0.7.0** | ✅ 当前 | **审计后清理。** 删掉 0.2.0 起就已失灵的 `src/client.js`（621 行 / 28.4 kB 死代码，`dsh.client` 声明既已删除，这个浏览器端就再无入口），包体 83.5 → 79.0 kB。README 里「浏览器设置卡片」那段与 0.2.0「前端已删」自相矛盾，已改为「设置命名空间（无界面）」。版本表补回 0.4.0–0.6.1 的缺档。另：`package.json` 的 `exports["./client"]` 与 `check` 脚本同步摘除。 |
+| 0.6.1 | ✅ 可用 | **两处修复，都会让宿主静默失效或冻结。** ① `isCheckpointSource` 认错了宿主的 source 形状：宿主 0.2.x 发的是 `{kind:"compact-checkpoint"}`，代码判的是宿主旧版的 `{kind:"plugin", plugin:"compact"}`，条件**永远不成立** ⇒ 检查点处理分支从未进入，连带 `recall(type:"checkpoint")` 一直取不到检查点（修复前认得 0 个，修复后 5 个）。② `parseSeqSpec` 缺 `Number.isSafeInteger` 上界校验：`recall(type:"seq", id:"9007199254740992")` 会在 `expandSelections` 的 `seq += 1` 循环里**同步死循环**（2^53 上 `+1` 不改变数值），工具永不返回、定时器不触发、宿主必须重启。parser 与 expander 两层都已加防护，顺带拒绝 `seq 0`。另修三处「单个畸形节点炸掉整次编译」：`content` 为 null、数组含 null 块、`content` 非数组，原本都抛 `TypeError` 而整次压缩作废（宿主把错误吞成 warning，症状是「压缩就是不发生」）。测试 137→149。 |
+| 0.6.0 | ✅ 可用 | 检查点内注入正文清理（`elideCheckpointInjectedBodies`，默认关）。旧检查点里带着它编译时那份记忆快照与规则块，而每次压缩都会重新注入一遍 —— 那份副本就是纯重复。开启后把它换成一行指针，原文仍在 append-only 日志里可 `recall`。实测 90,877 → 46,290 字符（−44,737）。另加 `elideSourceKinds`（按 source.kind 丢弃注入型行）。 |
+| 0.5.0 | ✅ 可用 | 补齐 0.2.2 兼容面：tool-result 的 `toolCallId` 从 `content[0]` 移到 message 层后，`-> result N` 指针的映射预扫描一直没命中（**静默**丢失全部 result 指针，`recall(type:"result")` 因此失效）。同时整理 `session-compat`，两种 session 形状统一走一对访问器。 |
+| 0.4.0 | ✅ 可用 | **默认值改为「尽量保留原文」**：`userTextTokens` 1024→**16384**、`textTokens` 512→**8192**、`checkpointCap` 65536→**393216**、`retainTokens` 5120→**20480**。实测（3524 节点 / 269 万 token 真实会话）：50 万 shadowed 区间下对话正文保留率 **22.0% → 98.4%**，80 万区间 98.6%。**关键**：默认值改动同时修好了 preset 隔离场景——preset 的 `compaction-basic` 行本身不写 `config`，因此直接吃到新默认值，不必再改 preset。单条预算按实测最长条目（用户 4745 / 助手 4043 token）留 3.4x / 2x 余量，不再触发单条截断。`checkpointCap` 建议不超过模型上下文窗口的 40%（393216 ≈ 1M 窗口的 39%）。 |
+| 0.3.0 | ✅ 可用 | **修「预设场景静默失效」**：宿主挂了 agent preset 时，preset 在自己的 isolate realm 里另有引擎实例，本包插在宿主层的那行进不去，压缩**静默回落到官方 basic**（工具却照常可用）。本版启动后自检 preset 接管情况并打 `warn`，开关 `warnOnPresetTakeover`。补 19 条 preset 场景测试。**引擎行为未变，只是不再静默。** |
 | 0.2.1 | ⚠️ 已弃用 | 首次尝试加自检，但**读错了字段名**：`compositionInventory()` 返回的是 `{entryId, moduleName, enabled}`，我按 `{id, name, disabled}` 读，结果**永远判定「健康」**——比不检查更糟，因为它假装检查过。另有四处上下文缺字段时抛 `TypeError` 的路径。请用 0.3.0。 |
 | 0.2.0 | ✅ 可用 | **把 `dsh.client` 声明整个删掉。** 那张可选设置卡片会让宿主建一条永远激活不了的前端行，而激活失败会**中止整个 web boot**。这个引擎本来就不需要前端，所以前端没了。 |
 | 0.1.9 | ⚠️ 已弃用 | 想靠修正 `dsh.client.inject` 解决激活失败。import 通了，行还是没激活。**bundle 装法起不来。** |

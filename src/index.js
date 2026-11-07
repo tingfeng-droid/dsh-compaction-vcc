@@ -28,17 +28,44 @@ import { sessionEventAt, sessionEvents } from "./session-compat.js";
 const DEFAULT_THRESHOLD_RATIO = 0.5;
 /** Default number of complete recent turns kept verbatim. */
 const DEFAULT_RETAIN_TURNS = 1;
-/** Default retained-region token ceiling (never exceeded by turn extension). */
-const DEFAULT_RETAIN_TOKENS = 5120;
+/**
+ * Default retained-region token ceiling (never exceeded by turn extension).
+ *
+ * ⚠️ 2026-11-07 (this fork) — raised 5120 → 20480. The retained region is the
+ * span a compaction NEVER touches, so this is the first line of defence for
+ * "the latest exchange must stay verbatim". 5120 covered roughly one short
+ * round trip (~8.5k CJK chars); 20480 covers several complete exchanges
+ * (~33k CJK chars) and stops a fresh memory snapshot from sliding into the
+ * shadowed span the moment it is injected.
+ */
+const DEFAULT_RETAIN_TOKENS = 20480;
 /** Default total cap for one compiled checkpoint, in compiler tokens. */
 const DEFAULT_MAX_TOKENS = 8192;
 /** Default scaled-cap fraction of the shadowed token count. */
 const DEFAULT_CHECKPOINT_SCALE = 0.1;
-/** Default absolute ceiling for the scaled checkpoint cap. */
-const DEFAULT_CHECKPOINT_CAP = 65536;
-/** Default per-block budgets for the compiled view (compiler tokens). */
-const DEFAULT_TEXT_TOKENS = 512;
-const DEFAULT_USER_TEXT_TOKENS = 1024;
+/**
+ * Default absolute ceiling for the scaled checkpoint cap.
+ *
+ * ⚠️ 2026-11-07 (this fork) — raised 65536 → 393216. This is the cap that
+ * actually decides how much conversation text survives a compaction: the
+ * per-block budgets below only cap ONE entry, while this cap bounds the whole
+ * checkpoint. Measured on a real 3524-node / 2.69M-token session, conversation
+ * text retained after compaction was 22.0% at 65536 but 98.4% at 393216 (50万
+ * shadowed span). 393216 keeps a 1M-window model at ~40% checkpoint occupancy,
+ * leaving room for the live conversation. Keep it under 40% of the context
+ * window if you retune for a smaller model.
+ */
+const DEFAULT_CHECKPOINT_CAP = 393216;
+/**
+ * Default per-block budgets for the compiled view (compiler tokens).
+ *
+ * ⚠️ 2026-11-07 (this fork) — raised 512/1024 → 8192/16384 so a single long
+ * message is never the bottleneck. Measured longest real entries were 4043
+ * (assistant) and 4745 (user) tokens, so these leave 2x / 3.4x headroom and
+ * the per-block cap stops truncating entirely.
+ */
+const DEFAULT_TEXT_TOKENS = 8192;
+const DEFAULT_USER_TEXT_TOKENS = 16384;
 const DEFAULT_TOOL_CALL_TOKENS = 128;
 const DEFAULT_TOOL_RESULT_EXCERPT_TOKENS = 256;
 /** Backend provenance recorded on the `compaction/summary` event. */
@@ -67,6 +94,8 @@ const COMPILER_CONFIG_KEYS = [
   "includeReasoning",
   "stripNoiseXml",
   "noisePatterns",
+  "elideSourceKinds",
+  "elideCheckpointInjectedBodies",
   "toolKeyFields",
   "toolArgTools",
   "hideTools",
@@ -153,6 +182,8 @@ export function resolveConfig(config = {}) {
     includeReasoning: config.includeReasoning ?? false,
     stripNoiseXml: config.stripNoiseXml ?? true,
     noisePatterns: compileNoisePatterns(config.noisePatterns !== undefined && config.noisePatterns.length > 0 ? config.noisePatterns : DEFAULT_NOISE_PATTERNS),
+    elideSourceKinds: resolveSourceKindList(config.elideSourceKinds),
+    elideCheckpointInjectedBodies: config.elideCheckpointInjectedBodies ?? false,
     toolKeyFields: resolveToolKeyFields(config.toolKeyFields),
     toolArgTools: resolveToolNameList(config.toolArgTools, DEFAULT_ARG_TOOLS, "toolArgTools"),
     hideTools: resolveToolNameList(config.hideTools, [], "hideTools"),
@@ -266,6 +297,15 @@ function validatePolicy(config, name) {
   if (config.noisePatterns !== undefined) {
     if (!Array.isArray(config.noisePatterns) || config.noisePatterns.some((pattern) => typeof pattern !== "string")) throw new Error(`${name}.noisePatterns must be an array of strings`);
   }
+  // An empty list is valid and means "elide nothing" (the stock default), so
+  // only the element shape is asserted here.
+  if (config.elideSourceKinds !== undefined
+    && (!Array.isArray(config.elideSourceKinds) || config.elideSourceKinds.some((entry) => typeof entry !== "string" || entry.length === 0))) {
+    throw new Error(`${name}.elideSourceKinds must be an array of non-empty strings`);
+  }
+  if (config.elideCheckpointInjectedBodies !== undefined && typeof config.elideCheckpointInjectedBodies !== "boolean") {
+    throw new Error(`${name}.elideCheckpointInjectedBodies must be a boolean`);
+  }
   for (const key of ["toolArgTools", "hideTools"]) {
     if (config[key] !== undefined && (!Array.isArray(config[key]) || config[key].some((entry) => typeof entry !== "string" || entry.length === 0))) {
       throw new Error(`${name}.${key} must be an array of non-empty strings`);
@@ -285,6 +325,25 @@ function resolveToolNameList(configured, fallback, key) {
   if (configured === undefined || configured.length === 0) return [...fallback];
   if (!Array.isArray(configured) || configured.some((entry) => typeof entry !== "string" || entry.length === 0)) {
     throw new Error(`InstantCompactionConfig: ${key} must be an array of non-empty strings`);
+  }
+  return [...new Set(configured)];
+}
+
+/**
+ * Validate `elideSourceKinds` — the list of message `source.kind` values whose
+ * bodies collapse to recall pointers inside a checkpoint.
+ *
+ * Unlike `hideTools`/`toolArgTools`, an EMPTY list is meaningful here: it is the
+ * default and it means "elide nothing", which keeps this fork's added behavior
+ * off for every stock user. The schema adapter's injected `[]` therefore maps to
+ * the same no-op the absent key does, so no fallback list is needed.
+ * @param configured - raw configured value, possibly absent.
+ * @returns deduplicated list of source kinds to elide (possibly empty).
+ */
+function resolveSourceKindList(configured) {
+  if (configured === undefined) return [];
+  if (!Array.isArray(configured) || configured.some((entry) => typeof entry !== "string" || entry.length === 0)) {
+    throw new Error("InstantCompactionConfig: elideSourceKinds must be an array of non-empty strings");
   }
   return [...new Set(configured)];
 }
@@ -426,6 +485,8 @@ export class InstantCompactionEngine extends CompactionEngine {
     includeReasoning: z.boolean(),
     stripNoiseXml: z.boolean(),
     noisePatterns: z.array(z.string()),
+    elideSourceKinds: z.array(z.string()),
+    elideCheckpointInjectedBodies: z.boolean(),
     toolKeyFields: z.dict(z.string()),
     toolArgTools: z.array(z.string()),
     hideTools: z.array(z.string()),
@@ -530,10 +591,31 @@ export class InstantCompactionEngine extends CompactionEngine {
   _installSettingsSection(ctx) {
     const entry = this.entry;
     const base = pickSettingsFields(entry);
-    // dsh 0.1.2 removed installSettingsSection/settingsNamespace. Register
-    // through ctx.settings when the service exists; otherwise keep the
-    // composition entry as the config source.
+    // ⚠️ 2026-11-07 — `settings.register()` does not exist on host 0.2.x.
+    //
+    // Host 0.2.2's SettingsForms exposes configure/prepareDocument/describe/
+    // update/replace/mutate/write/schema: it is a CONFIG EDITOR keyed by profile
+    // entry id, not a namespace registrar. Calling `register` threw a TypeError
+    // that cordis caught and logged at `error` level while marking this fiber
+    // FAILED — the engine itself kept working (it reads the composition entry),
+    // so the ONLY visible symptom was that settings.yaml edits silently did
+    // nothing. That is the worst failure shape for a "lossless" plugin: it looks
+    // configured and is not.
+    //
+    // Probe for the capability instead of assuming it. When absent, keep reading
+    // the composition entry (identical behavior to a deployment with no settings
+    // service) and say so once, loudly, rather than throwing into the void.
     ctx.inject(["settings"], (scoped) => {
+      if (typeof scoped.settings?.register !== "function") {
+        // Host 0.2.x path: no namespace registration exists. The composition
+        // entry is authoritative, which is exactly what `_reloadConfig` already
+        // does — so there is nothing to install, but the user deserves to know
+        // why the settings UI does not reach this engine.
+        this.source = () => entry;
+        this._reloadConfig();
+        this.ctx.logger.warn("compaction-vcc: this host exposes no settings.register(); engine reads cordis config only — edit `compaction-vcc.config` in cordis.patch.yml");
+        return;
+      }
       const scope = scoped.settings.register(
         InstantCompactionEngine.SETTINGS_NAMESPACE,
         InstantCompactionEngine.SETTINGS_SCHEMA,
@@ -803,10 +885,15 @@ export class InstantCompactionEngine extends CompactionEngine {
       throw new ManualCompactionError("busy", "manual compaction requires an idle agent with no waking queued work", { cause: error });
     }
   }
-  /** Bind the effective token meter and dynamically dispatched compile hook. */
+  /**
+   * Bind the effective token meter, the dynamically dispatched compile hook,
+   * and the checkpoint cap. `checkpointCap` rides along so the checkpoint
+   * footer can name the real ceiling when a compile had to elide content.
+   */
   regionDependencies() {
     return {
       meter: this.ctx.tokenMeter,
+      checkpointCap: this.config.checkpointCap,
       compile: (prepared, owner, abort) => this.compile(prepared, owner, abort)
     };
   }

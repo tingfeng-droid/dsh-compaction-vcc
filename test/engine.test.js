@@ -83,8 +83,16 @@ test("compile() compiles a real session deterministically with seq provenance", 
   assert.match(text, /please fix the bug/);
   assert.match(text, /on it/);
   assert.match(text, /\* read "a\.js" \(seq 2 -> result 3\)/);
+  // ⚠️ 2026-11-07 — this used to assert `doesNotMatch(/file content/)`, which
+  // encoded a bug as expected behavior: the compiler had no `role:"tool"`
+  // branch, so host 0.2.x tool results (role "tool", toolCallId on the message)
+  // produced no entry at all and `stats.toolResults` stayed 0. The result body
+  // belongs in the checkpoint, excerpted to `toolResultExcerptTokens`, with the
+  // full text one `recall(type:"result")` away via the `-> result N` pointer.
+  assert.match(text, /\[tool\]/);
+  assert.match(text, /file content/);
+  assert.ok(result.stats.toolResults > 0, "tool results must be counted");
   assert.doesNotMatch(text, /-> read: ok/);
-  assert.doesNotMatch(text, /file content/);
   assert.match(text, /done/);
   // Deterministic: compiling twice yields identical output.
   const again = await engine.compile(prepared, undefined, undefined);

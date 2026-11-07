@@ -126,9 +126,21 @@ test("excerptToolResult passes small results through and anchors the tail", () =
 });
 
 test("isCheckpointSource recognizes the seam marker", () => {
+  // Host 0.2.x shape (what `compactCheckpointSource()` actually emits).
+  assert.equal(isCheckpointSource({ kind: "compact-checkpoint", compactionId: "c1" }), true);
+  assert.equal(
+    isCheckpointSource({ kind: "compact-checkpoint", compactionId: "c1", sourceCommandId: "cmd-1" }),
+    true,
+  );
+  // Legacy host shape, kept so older checkpoints stay recallable.
   assert.equal(isCheckpointSource({ kind: "plugin", plugin: "compact" }), true);
+  // Not checkpoints.
+  assert.equal(isCheckpointSource({ kind: "plugin", plugin: "other" }), false);
   assert.equal(isCheckpointSource({ kind: "user" }), false);
+  assert.equal(isCheckpointSource({ kind: "compact-checkpoint-typo" }), false);
+  assert.equal(isCheckpointSource({}), false);
   assert.equal(isCheckpointSource(undefined), false);
+  assert.equal(isCheckpointSource(null), false);
 });
 
 test("compileNodes collapses a tool step and elides reasoning", () => {

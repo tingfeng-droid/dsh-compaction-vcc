@@ -1,4 +1,27 @@
 /**
+ * Human-facing notice for a compile that had to drop rows to stay under
+ * `checkpointCap`. This is the moment the checkpoint stops being near-lossless,
+ * so the footer names the ceiling, what was sacrificed, and the two ways out:
+ * start a new conversation, or `recall` the elided layers back.
+ *
+ * Deterministic and model-free like the rest of this backend: the numbers come
+ * from the compile stats, never from a summarizer.
+ * @param compiled - compile result carrying `stats` and `capped`.
+ * @param checkpointCap - configured ceiling in compiler tokens, if known.
+ * @returns one Markdown line appended to the checkpoint footer.
+ */
+function buildCapNotice(compiled, checkpointCap) {
+  const stats = compiled.stats ?? {};
+  const parts = [];
+  if (stats.elidedToolRows > 0) parts.push(`${stats.elidedToolRows} 条工具结果`);
+  if (stats.elidedRows > 0) parts.push(`${stats.elidedRows} 条目`);
+  const dropped = parts.length === 0 ? "部分最旧内容" : `最旧的 ${parts.join(" + ")}`;
+  const cap = typeof checkpointCap === "number" && checkpointCap > 0 ? `（上限 ${checkpointCap} tokens）` : "";
+  return `⚠️ **上下文已接近上限${cap}**：本次压缩丢弃了 ${dropped}，检查点已不再无损。`
+    + "建议尽快开新对话；旧内容仍可用 `recall` 按 seq 或 `[checkpoint N]` 调回。";
+}
+
+/**
  * Surface retention selection and the shared log-recorded compaction
  * transaction for `dsh-compaction-vcc`.
  *
@@ -122,10 +145,23 @@ export function selectCompactableRange(session, measurement, retainTurns, retain
     keepFromIdx = 0;
     while (keepFromIdx < turns.length && turns[keepFromIdx] < mandatoryTurnFloor) keepFromIdx += 1;
   }
-  while (keepFromIdx > 0) {
+  // ⚠️ 2026-11-07 — `keepFromIdx` can land exactly ON `turns.length`, which is
+  // one past the last valid node index. It happens whenever the newest node
+  // alone already exceeds `retainTokens`: both the whole-turn roll-back and the
+  // node-suffix roll-back break on their first iteration, leaving keepFromIdx
+  // at its initial `turns.length`. Reading `surfaceNodes[keepFromIdx]` then
+  // yields `undefined`, and the host's `toolPairingBalancedBefore` throws
+  // `tool-pairing balance: surface seq undefined not found` — which the
+  // automatic pre-step path swallows as a warning (compaction silently does not
+  // happen) and the manual path misreports as `busy`. There is no safe span to
+  // compact in that state, so return null explicitly instead of probing.
+  while (keepFromIdx > 0 && keepFromIdx < surfaceNodes.length) {
     if (toolPairingBalancedBefore(session, surfaceNodes[keepFromIdx])) break;
     keepFromIdx -= 1;
   }
+  // Reaching the ceiling means nothing could be retained, so the whole surface
+  // would have to move; there is no compactable prefix. Treat it as "no range".
+  if (keepFromIdx >= surfaceNodes.length) return null;
   // A `system/message` at surface node 0 may only be rewritten by a
   // system/message over exactly that node, so the range never starts there:
   // the prompt head stays outside every compacted span.
@@ -318,15 +354,23 @@ async function compileCompaction(dependencies, prepared, agent, compactionId, so
   const retainedTokenCount = retainedNodes.reduce((total, node) => total + node.tokens, 0);
   const footerLine = retainedNodes.length === 0 ? undefined
     : `尾部原文保留: ${retainedNodes.length} 节点 / ~${retainedTokenCount} tokens（未被压缩,仍在对话中）`;
+  // Cap-hit notice. `capped` means this compile had to drop rows to fit the
+  // checkpoint budget: the oldest tool/result rows first, then the oldest
+  // entries (prior checkpoints leave `[checkpoint N]` recall pointers). That is
+  // the point where the checkpoint stopped being near-lossless, so the user is
+  // told plainly and given the two ways forward (new conversation, or recall).
+  // Always emitted when it happens — a silent elision would read as data loss.
+  const capNoticeLine = compiled.capped !== true ? undefined : buildCapNotice(compiled, dependencies.checkpointCap);
+  const footerLines = [capNoticeLine, footerLine].filter((line) => line !== undefined);
   const bodyEntries = [
     introLine,
     headerLine,
     ...compiled.entries,
-    ...(footerLine === undefined ? [] : [footerLine])
+    ...footerLines
   ];
   const summary = [{ type: "text", text: fenceCode(joinCompiledEntries(bodyEntries)) }];
   const checkpointMessage = createUserMessage({
-    content: frameCheckpoint(compiled.entries, headerLine, introLine, footerLine),
+    content: frameCheckpoint(compiled.entries, headerLine, introLine, footerLines),
     source: compactCheckpointSource(compactionId, sourceCommandId)
   });
   const framedTokenCount = dependencies.meter.estimateMessage(checkpointMessage);
@@ -351,7 +395,14 @@ async function compileCompaction(dependencies, prepared, agent, compactionId, so
  */
 export function fenceCode(text) {
   const runs = text.match(/`+/gu);
-  const longest = runs === null ? 0 : Math.max(...runs.map((run) => run.length));
+  // ⚠️ 2026-11-07 — reduce, not `Math.max(...runs)`. Spreading turns every run
+  // into a call argument, and V8 caps the argument count: ~130k backtick runs
+  // (a ~0.25 MB body of alternating `a`) already throws
+  // `RangeError: Maximum call stack size exceeded`, aborting the whole compile.
+  // The default checkpoint cap allows bodies well past that size, so this was
+  // reachable with ordinary content that happens to contain many inline-code
+  // spans.
+  const longest = runs === null ? 0 : runs.reduce((max, run) => Math.max(max, run.length), 0);
   const fence = "`".repeat(Math.max(3, longest + 1));
   return `${fence}\n${text}\n${fence}`;
 }
