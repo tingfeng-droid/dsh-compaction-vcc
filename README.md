@@ -63,6 +63,36 @@ Recall keeps **everything**: text, reasoning, raw tool-call arguments, nested to
 
 Every checkpoint also frames a short **RECALL guide** at its head, telling the model exactly how to use `recall` / `search` to recover elided content. When a prior checkpoint is elided under cap pressure it never vanishes silently: it leaves a single `[checkpoint N]` line (N = compaction ordinal, 1 = oldest), which `recall(type:"checkpoint", id:"N")` restores in full.
 
+## Pairing with `dsh-tingfeng`: keep rules and memory verbatim too
+
+Keeping the **conversation** verbatim is only half of it. A long session carries two other kinds of text that get rewritten by summarization compaction, and they matter more than anything else in the context:
+
+- the **rules** the agent must follow (workspace instructions, tool contracts);
+- the **memory** injected every turn (stable facts, preferences, project knowledge).
+
+An LLM summarizer compresses those too. And a rule is exactly the kind of text where a paraphrase is not a downgrade but a **behaviour change**: "when the conclusion conflicts with the evidence, change the conclusion" turned into "be careful with conclusions" is a different instruction, and the agent has no way to notice the edit.
+
+[`dsh-tingfeng`](https://github.com/tingfeng-droid/dsh-tingfeng) — the memory plugin this engine is developed alongside — closes that half:
+
+- it re-injects rules and memory **verbatim** after compaction, so the injected blocks stay original text and never become a compressed paraphrase;
+- it marks them with its own `source.kind`, which lets this engine tell an injected block apart from live dialogue.
+
+**The two features cooperate through one config flag.** With `elideCheckpointInjectedBodies: true`, this engine replaces the *stale copy* of a memory/rules block inside an old checkpoint with a one-line pointer, because the memory plugin will inject a fresh copy anyway. That flag is only safe because of the marking above: the engine can find the block boundaries instead of guessing them.
+
+```
+compaction-vcc        keeps the conversation verbatim, archives what it elides
+      +
+dsh-tingfeng          re-injects rules + memory verbatim after every compaction
+      +
+elideCheckpointInjectedBodies: true
+      ↓
+no summarizer anywhere in the loop — nothing in the context is ever rewritten
+```
+
+**What you get:** after many compactions, the agent can still quote your rules word for word, still tell a number *you measured* from a number *it estimated*, and still recall which conclusions were overturned. With summarization compaction, those three all collapse into a fluent paragraph that reads like fact.
+
+> **Note on `elideCheckpointInjectedBodies`.** It is off by default. 0.7.3 fixed a data-loss bug in this exact path (a truncated block lost its closing tag and the span ran on into live dialogue — 56,485 characters elided, ~4,000 of them real turns). Fixed and covered by a regression test, but this is the one setting that walks block boundaries, so pin a version you have tested if you enable it. If you do not run `dsh-tingfeng`, leave it off.
+
 ## Configuration
 
 All fields optional; defaults shown.
