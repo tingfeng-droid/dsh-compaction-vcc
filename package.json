@@ -1,6 +1,6 @@
 {
   "name": "dsh-compaction-vcc",
-  "version": "0.7.3",
+  "version": "0.7.4",
   "description": "LLM-free deterministic context compaction for DeepSeek Harness. A drop-in replacement for @deepseek-ai/dsh-compaction-basic that moves original tokens instead of summarizing them; anything cut stays recoverable verbatim through (seq N) pointers and recall.",
   "type": "module",
   "main": "src/index.js",
