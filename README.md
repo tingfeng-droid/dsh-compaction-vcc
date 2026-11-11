@@ -1,13 +1,19 @@
 # dsh-compaction-vcc
 
-> **Maintained by [tingfeng-droid](https://github.com/tingfeng-droid).** Based on [TsFreddie/dsh-compaction-instant](https://github.com/TsFreddie/dsh-compaction-instant) (MIT) — full credit to the original author for the conversation-compiler design this project builds on.
-> Main changes: fixed host 0.2.2 compatibility where `toolCallId` moved from `content[0]` to the message, which silently dropped every `-> result N` pointer (see `src/compiler.js` / `src/session-compat.js`), plus a 100-test suite.
+**Your long session gets summarized by a model. The summary is invented text — and the model then reasons from it as if it were fact.**
+
+This plugin removes the model from that step. Compaction becomes deterministic text processing: **a million tokens of history compile in milliseconds, with zero LLM calls, and not one character is rewritten.** Anything cut carries a `(seq N)` pointer back into the durable session log and can be pulled back verbatim with `recall`.
+
+A **drop-in replacement for `@deepseek-ai/dsh-compaction-basic`** — same seam, same events, same failure vocabulary. Built-in presets load it unchanged.
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-Instant, near-lossless context compaction for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) — a **drop-in replacement for `@deepseek-ai/dsh-compaction-basic`** that replaces LLM summarization with the deterministic conversation-compiler principle of [lllyasviel/VCC](https://github.com/lllyasviel/VCC).
+> **Maintained by [tingfeng-droid](https://github.com/tingfeng-droid).** Based on [TsFreddie/dsh-compaction-instant](https://github.com/TsFreddie/dsh-compaction-instant) (MIT) — full credit to the original author for the conversation-compiler design this project builds on.
+> The original project is archived upstream. This fork is maintained and tracks the current host API; see [Version history](#version-history) for what changed.
 
-A compaction compresses a shadowed history span in **milliseconds, with zero model calls**, keeping **original tokens only** — no paraphrase, no hallucination, no summarizer cost. Everything that is cut is still recoverable through `(seq N)` pointers into the durable session log.
+## The problem in one paragraph
+
+When context runs out, the built-in engine asks a model to summarize the history. Ask a model to summarize and it fills the details it cannot quite recall with plausible-sounding wording — **and that filled-in material is invented**. It is also hard to notice: the summary reads fluently, and the model then treats **its own summary as a factual premise**. A reworded number or a dropped precondition is enough to put an entire downstream chain of reasoning on a false footing. The longer the session, the more the summary has to cover, and the more chances there are to lose information.
 
 ## Why keeping original tokens prevents hallucination
 
@@ -27,7 +33,7 @@ This matters most in long sessions: the longer the context, the more a summary h
 
 ## Key features
 
-- **LLM-free** — compaction never invokes a model. No summarizer prompt, no inference latency, no token spend; the compile is deterministic text processing, so a million-token history compresses in milliseconds.
+- **LLM-free** — compaction never invokes a model. No summarizer prompt, no inference latency, no token spend; the compile is deterministic text processing. Measured on this machine: **1,000,000 tokens of history → 153 ms** (Chinese) / **84 ms** (English), 3-run best, no model calls.
 - **Near-lossless** — output contains only original tokens; every cut is marked and points at its durable `seq`, and prior checkpoints are copied verbatim.
 - **Instant** — a single deterministic pass over the shadowed nodes; no network, no model, no KV-cache concerns.
 - **Contract-exact drop-in** — same seam, events, provenance and failure vocabulary as `compaction-basic`; every built-in preset loads it unchanged (alias install).

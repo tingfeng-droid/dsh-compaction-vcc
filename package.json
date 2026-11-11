@@ -1,7 +1,7 @@
 {
   "name": "dsh-compaction-vcc",
   "version": "0.7.3",
-  "description": "VCC-style instant, near-lossless deterministic compaction engine for the DeepSeek Harness — a drop-in replacement for @deepseek-ai/dsh-compaction-basic. Fork of TsFreddie/dsh-compaction-instant (MIT) with host 0.2.2 toolCallId compatibility fixes.",
+  "description": "LLM-free deterministic context compaction for DeepSeek Harness. A drop-in replacement for @deepseek-ai/dsh-compaction-basic that moves original tokens instead of summarizing them; anything cut stays recoverable verbatim through (seq N) pointers and recall.",
   "type": "module",
   "main": "src/index.js",
   "types": "types/index.d.ts",
@@ -59,11 +59,13 @@
   "keywords": [
     "cordis",
     "dsh",
+    "dsh-plugin",
     "deepseek-harness",
     "compaction",
     "context-compression",
     "vcc",
-    "token"
+    "token",
+    "recall"
   ],
   "license": "MIT",
   "peerDependencies": {
